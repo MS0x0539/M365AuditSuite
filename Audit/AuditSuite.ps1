@@ -92,7 +92,8 @@
       [A]  Run all reports
 
     Connects once, runs the chosen report(s), then disconnects.
-    All CSV exports land on the Desktop with a timestamp prefix.
+    All CSV exports land in a per-tenant subfolder under $ExportPath (configurable in the
+    configuration section below). Default: the folder where this script lives ($PSScriptRoot).
 
 .NOTES
     Author      : Melih Sivrikaya
@@ -161,8 +162,11 @@ $StaleDays = 90
 # SCRIPT INTERNALS — do not edit below this line
 # ===========================================================================
 
-$Desktop = [Environment]::GetFolderPath('Desktop')
-$script:ExportFolder = $Desktop
+# Export root — CSVs are written to a per-tenant subfolder here.
+# Default: the folder where this script lives. Change if you prefer elsewhere,
+# e.g. [Environment]::GetFolderPath('Desktop') for the Desktop.
+$ExportPath = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$script:ExportFolder = $ExportPath
 
 # ── Shared lookup tables ───────────────────────────────────────────────────────
 
@@ -538,7 +542,7 @@ function Invoke-CAAccessReport {
         ($results | Where-Object State -eq "Report-only").Count,
         ($results | Where-Object State -eq "Disabled").Count) -ForegroundColor Cyan
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_CAAccessReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_CAAccessReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [2] License Usage ─────────────────────────────────────────────────────────
@@ -593,7 +597,7 @@ function Invoke-LicenseUsage {
     if ($fullyUsed    -gt 0) { Write-Host "  At capacity (0 left) : $fullyUsed"    -ForegroundColor Red }
     if ($nearCapacity -gt 0) { Write-Host "  Near capacity (>=90%): $nearCapacity" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_LicenseUsage_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_LicenseUsage_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [3] App Registration Security Audit ───────────────────────────────────────
@@ -706,7 +710,7 @@ function Invoke-AppRegistrationAudit {
     if ($totalNoOwner -gt 0) { Write-Host "  No owner                : $totalNoOwner" -ForegroundColor Yellow }
     if ($totalMulti   -gt 0) { Write-Host "  Multi-tenant            : $totalMulti"   -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_AppRegistrationAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_AppRegistrationAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [4] App Registration Expiry ───────────────────────────────────────────────
@@ -758,7 +762,7 @@ function Invoke-AppRegistrationExpiry {
         }
     }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_AppRegistrationExpiry_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_AppRegistrationExpiry_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [5] Device Export ─────────────────────────────────────────────────────────
@@ -844,7 +848,7 @@ function Invoke-DeviceExport {
     if ($totalDisabled     -gt 0) { Write-Host "  Disabled        : $totalDisabled"   -ForegroundColor Red    }
     if ($totalNonCompliant -gt 0) { Write-Host "  Non-compliant   : $totalNonCompliant" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_DeviceExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_DeviceExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [6] Role Assignments ──────────────────────────────────────────────────────
@@ -926,7 +930,7 @@ function Invoke-RoleAssignments {
     Write-Host ""
     Write-Host "  Total assignments: $($results.Count)  |  Active: $(($results | Where-Object AssignmentType -eq 'Active').Count)  |  Eligible: $(($results | Where-Object AssignmentType -eq 'Eligible').Count)" -ForegroundColor Cyan
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_RoleAssignments_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_RoleAssignments_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [7] Role Policies ─────────────────────────────────────────────────────────
@@ -1022,7 +1026,7 @@ function Invoke-RolePolicies {
     Write-Host ""
     Write-Host "  Total role policies: $($results.Count)" -ForegroundColor Cyan
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_RolePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_RolePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [8] PIM Activation & Request History ─────────────────────────────────────
@@ -1223,7 +1227,7 @@ function Invoke-PIMActivationHistory {
         Write-Host ("    {0,-55}: {1}" -f $_.Name, $_.Count) -ForegroundColor White
     }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_PIMActivationHistory_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_PIMActivationHistory_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [9] PIM Security Alerts ───────────────────────────────────────────────────
@@ -1306,7 +1310,7 @@ function Invoke-PIMSecurityAlerts {
     if ($high   -gt 0) { Write-Host "  High severity    : $high"   -ForegroundColor Red    }
     if ($medium -gt 0) { Write-Host "  Medium severity  : $medium" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_PIMSecurityAlerts_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_PIMSecurityAlerts_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [10] Find Inactive Devices ────────────────────────────────────────────────
@@ -1395,7 +1399,7 @@ function Invoke-FindInactiveDevices {
     Write-Host "  Inactive devices (>$threshold days): $($results.Count)" -ForegroundColor Yellow
     if ($neverSeen -gt 0) { Write-Host "  Never seen: $neverSeen" -ForegroundColor Red }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_InactiveDevices_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_InactiveDevices_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [9] Find Inactive Users ───────────────────────────────────────────────────
@@ -1470,7 +1474,7 @@ function Invoke-FindInactiveUsers {
     Write-Host "  Inactive (>$threshold days): $inactive"            -ForegroundColor Yellow
     if ($neverSeen -gt 0) { Write-Host "  Never seen               : $neverSeen" -ForegroundColor Red }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_InactiveUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_InactiveUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [10] Domain Export ────────────────────────────────────────────────────────
@@ -1527,7 +1531,7 @@ function Invoke-DomainExport {
     if ($unverified -gt 0) { Write-Host "  Unverified     : $unverified" -ForegroundColor Yellow }
     if ($federated  -gt 0) { Write-Host "  Federated      : $federated"  -ForegroundColor Cyan   }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_DomainExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_DomainExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [11] Guest User Report ────────────────────────────────────────────────────
@@ -1593,7 +1597,7 @@ function Invoke-GuestUserReport {
     if ($pending -gt 0) { Write-Host "  Pending acceptance: $pending" -ForegroundColor Yellow }
     if ($never   -gt 0) { Write-Host "  Never signed in  : $never"    -ForegroundColor Red    }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_GuestUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_GuestUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [12] Group Export ─────────────────────────────────────────────────────────
@@ -1675,7 +1679,7 @@ function Invoke-GroupExport {
     if ($noOwner        -gt 0) { Write-Host "  No owner         : $noOwner"        -ForegroundColor Yellow }
     if ($roleAssignable -gt 0) { Write-Host "  Role-assignable  : $roleAssignable" -ForegroundColor Cyan   }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_GroupExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_GroupExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [13] Sign-in Log Export ───────────────────────────────────────────────────
@@ -1751,7 +1755,7 @@ function Invoke-SignInLogExport {
         }
     }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_SignInLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_SignInLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [14] Directory Audit Log ──────────────────────────────────────────────────
@@ -1813,7 +1817,7 @@ function Invoke-DirectoryAuditLog {
         Write-Host ("  {0,-35}: {1}" -f $_.Name, $_.Count) -ForegroundColor White
     }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_DirectoryAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_DirectoryAuditLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [15] Enterprise Applications Export ──────────────────────────────────────
@@ -1871,7 +1875,7 @@ function Invoke-EnterpriseAppExport {
     Write-Host "  Third-party      : $thirdParty"       -ForegroundColor Yellow
     if ($disabled -gt 0) { Write-Host "  Disabled         : $disabled" -ForegroundColor DarkGray }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_EnterpriseApps_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_EnterpriseApps_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [16] Delegated Permission Grants ─────────────────────────────────────────
@@ -1934,7 +1938,7 @@ function Invoke-DelegatedPermissionGrants {
     Write-Host "  Admin consent    : $adminConsent"     -ForegroundColor Yellow
     Write-Host "  User consent     : $userConsent"      -ForegroundColor Green
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_DelegatedPermissionGrants_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_DelegatedPermissionGrants_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [17] Authentication Methods Policy ───────────────────────────────────────
@@ -2018,7 +2022,7 @@ function Invoke-AuthMethodsPolicy {
     Write-Host "  Enabled          : $enabled"          -ForegroundColor Green
     Write-Host "  Disabled         : $disabled"         -ForegroundColor DarkGray
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_AuthMethodsPolicy_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_AuthMethodsPolicy_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [18] Named Locations Export ───────────────────────────────────────────────
@@ -2096,7 +2100,7 @@ function Invoke-NamedLocationsExport {
     Write-Host "  Country-based    : $countryCount"     -ForegroundColor Cyan
     if ($trustedCount -gt 0) { Write-Host "  Trusted          : $trustedCount" -ForegroundColor Green }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_NamedLocations_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_NamedLocations_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [19] Security Defaults Status ────────────────────────────────────────────
@@ -2121,7 +2125,7 @@ function Invoke-SecurityDefaultsStatus {
         Note                    = if ($isEnabled) { "Security Defaults active — CA policies are bypassed" } else { "Security Defaults disabled — verify CA policies are in place" }
     }
 
-    Write-CsvBom -Data @($result) -Path (Join-Path $Desktop "AuditSuite_SecurityDefaults_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data @($result) -Path (Join-Path $ExportPath "AuditSuite_SecurityDefaults_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [20] External Collaboration / B2B Settings ────────────────────────────────
@@ -2180,7 +2184,7 @@ function Invoke-ExternalCollaborationSettings {
         UsersCanReadOtherUsers        = $perms.AllowedToReadOtherUsers.ToString()
     }
 
-    Write-CsvBom -Data @($result) -Path (Join-Path $Desktop "AuditSuite_ExternalCollaboration_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data @($result) -Path (Join-Path $ExportPath "AuditSuite_ExternalCollaboration_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [21] Administrative Units ─────────────────────────────────────────────────
@@ -2253,7 +2257,7 @@ function Invoke-AdministrativeUnitsExport {
     Write-Host "  Total AUs        : $($results.Count)" -ForegroundColor Cyan
     if ($noAdmin -gt 0) { Write-Host "  No scoped admin  : $noAdmin" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_AdministrativeUnits_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_AdministrativeUnits_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [22] Intune Compliance Policies ──────────────────────────────────────────
@@ -2340,7 +2344,7 @@ function Invoke-IntuneCompliancePolicies {
     }
     if ($unassigned -gt 0) { Write-Host "  Not assigned     : $unassigned" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_IntuneCompliancePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_IntuneCompliancePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [23] Risky Users ──────────────────────────────────────────────────────────
@@ -2407,7 +2411,7 @@ function Invoke-RiskyUsersReport {
     if ($medium -gt 0) { Write-Host "  Medium           : $medium" -ForegroundColor Yellow    }
     if ($low    -gt 0) { Write-Host "  Low              : $low"    -ForegroundColor DarkYellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_RiskyUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_RiskyUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [24] Risk Detections ──────────────────────────────────────────────────────
@@ -2499,7 +2503,7 @@ function Invoke-RiskDetectionsReport {
     if ($high   -gt 0) { Write-Host "  High risk        : $high"   -ForegroundColor Red    }
     if ($medium -gt 0) { Write-Host "  Medium risk      : $medium" -ForegroundColor Yellow }
 
-    Write-CsvBom -Data $sorted -Path (Join-Path $Desktop "AuditSuite_RiskDetections_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data $sorted -Path (Join-Path $ExportPath "AuditSuite_RiskDetections_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [25] Microsoft Secure Score ───────────────────────────────────────────────
@@ -2585,7 +2589,7 @@ function Invoke-SecureScoreReport {
         Write-Host ("  {0,-58} {1,5}/{2,-5} ({3}%)" -f $entry.Title, $entry.Score, $entry.MaxScore, $entry.ScorePct) -ForegroundColor $c
     }
 
-    Write-CsvBom -Data ($results | Sort-Object Category, Title) -Path (Join-Path $Desktop "AuditSuite_SecureScore_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+    Write-CsvBom -Data ($results | Sort-Object Category, Title) -Path (Join-Path $ExportPath "AuditSuite_SecureScore_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ── [26] M365 Usage Reports ───────────────────────────────────────────────────
@@ -2694,8 +2698,13 @@ while ($null -eq $tenantChoice) {
 
 # Sanitise tenant name for use in folder/filenames (strip special characters)
 $script:TenantTag    = $tenantChoice.Name -replace '[^A-Za-z0-9_-]', ''
-$script:ExportFolder = Join-Path $Desktop $script:TenantTag
-New-Item -ItemType Directory -Force -Path $script:ExportFolder | Out-Null
+$script:ExportFolder = Join-Path $ExportPath $script:TenantTag
+try {
+    New-Item -ItemType Directory -Force -Path $script:ExportFolder -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host "  WARN: Could not create export subfolder — falling back to: $ExportPath" -ForegroundColor Yellow
+    $script:ExportFolder = $ExportPath
+}
 
 Write-Host ""
 Write-Host "  Tenant      : $($tenantChoice.Name)" -ForegroundColor Green
