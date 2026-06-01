@@ -33,8 +33,17 @@ if ([string]::IsNullOrWhiteSpace($yearsInput)) {
     $years = 2
 }
 
-# Export path
-$defaultPath = "$([Environment]::GetFolderPath('Desktop'))\$certName.cer"
+# Export path — resolve best available default (OneDrive Desktop → Desktop → C:\Audit)
+$defaultBase = $null
+foreach ($candidate in @([Environment]::GetFolderPath('Desktop'), "$env:USERPROFILE\Desktop", "C:\Audit")) {
+    if (-not $candidate) { continue }
+    try {
+        New-Item -ItemType Directory -Force -Path $candidate -ErrorAction Stop | Out-Null
+        $defaultBase = $candidate
+        break
+    } catch { continue }
+}
+$defaultPath = if ($defaultBase) { Join-Path $defaultBase "$certName.cer" } else { "$certName.cer" }
 $exportPath = Read-Host "Export path [default: $defaultPath]"
 if ([string]::IsNullOrWhiteSpace($exportPath)) {
     $exportPath = $defaultPath

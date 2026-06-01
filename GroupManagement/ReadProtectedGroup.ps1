@@ -93,9 +93,28 @@ $results = foreach ($groupName in $Groups) {
 }
 
 # =====================
+# Resolve export folder (Desktop OneDrive → Desktop default → C:\Audit)
+# =====================
+$exportFolder = $null
+foreach ($candidate in @([Environment]::GetFolderPath('Desktop'), "$env:USERPROFILE\Desktop", "C:\Audit")) {
+    if (-not $candidate) { continue }
+    try {
+        New-Item -ItemType Directory -Force -Path $candidate -ErrorAction Stop | Out-Null
+        $exportFolder = $candidate
+        break
+    } catch { continue }
+}
+
+if (-not $exportFolder) {
+    Write-Host "Could not resolve a writable export folder. Tried: Desktop (OneDrive), Desktop (default), C:\Audit" -ForegroundColor Red
+    try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
+    exit 1
+}
+
+# =====================
 # Export
 # =====================
-$outputFile = "$([Environment]::GetFolderPath('Desktop'))\GroupMembers_$(Get-Date -Format 'yyyy-MM-dd').csv"
+$outputFile = Join-Path $exportFolder "GroupMembers_$(Get-Date -Format 'yyyy-MM-dd').csv"
 $results | Export-Csv -Path $outputFile -NoTypeInformation -Encoding UTF8
 
 # =====================
