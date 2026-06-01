@@ -188,6 +188,27 @@ function Resolve-ExportFolder {
 }
 $script:ExportFolder = $null   # resolved after tenant selection
 
+# ── Executive report findings collector ───────────────────────────────────────
+$script:Findings = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+function Add-Finding {
+    param(
+        [string] $Category,
+        [ValidateSet("Critical","High","Medium","Low","Info")]
+        [string] $Severity,
+        [string] $Title,
+        [string] $Detail,
+        [string] $Recommendation
+    )
+    $script:Findings.Add([PSCustomObject]@{
+        Category       = $Category
+        Severity       = $Severity
+        Title          = $Title
+        Detail         = $Detail
+        Recommendation = $Recommendation
+    })
+}
+
 # ── Shared lookup tables ───────────────────────────────────────────────────────
 
 $TrustTypeLabels = @{
@@ -562,6 +583,22 @@ function Invoke-CAAccessReport {
         ($results | Where-Object State -eq "Report-only").Count,
         ($results | Where-Object State -eq "Disabled").Count) -ForegroundColor Cyan
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    $reportOnly = ($results | Where-Object State -eq "Report-only").Count
+    $disabled   = ($results | Where-Object State -eq "Disabled").Count
+    if ($reportOnly -gt 0) {
+        Add-Finding -Category "Conditional Access" -Severity "Medium" `
+            -Title "$reportOnly CA polic$(if ($reportOnly -eq 1) {'y'} else {'ies'}) in Report-only mode" `
+            -Detail "Report-only policies log results but do not enforce controls — users are not blocked or prompted." `
+            -Recommendation "Review report-only policies and promote to Enabled when confident in their scope."
+    }
+    if ($disabled -gt 0) {
+        Add-Finding -Category "Conditional Access" -Severity "Low" `
+            -Title "$disabled CA polic$(if ($disabled -eq 1) {'y'} else {'ies'}) disabled" `
+            -Detail "Disabled policies provide no protection whatsoever." `
+            -Recommendation "Review disabled policies and enable or remove them."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_CAAccessReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -616,6 +653,14 @@ function Invoke-LicenseUsage {
     Write-Host "  Total SKUs: $($results.Count)" -ForegroundColor Cyan
     if ($fullyUsed    -gt 0) { Write-Host "  At capacity (0 left) : $fullyUsed"    -ForegroundColor Red }
     if ($nearCapacity -gt 0) { Write-Host "  Near capacity (>=90%): $nearCapacity" -ForegroundColor Yellow }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    foreach ($entry in ($results | Where-Object { $_.Available -le 0 -and $_.Status -eq "Enabled" })) {
+        Add-Finding -Category "License Management" -Severity "Medium" `
+            -Title "License at capacity: $($entry.LicenseName)" `
+            -Detail "$($entry.Consumed) / $($entry.Purchased) units consumed. No licenses available for new assignments." `
+            -Recommendation "Purchase additional licenses or review and reclaim unused assignments."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_LicenseUsage_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -730,6 +775,20 @@ function Invoke-AppRegistrationAudit {
     if ($totalNoOwner -gt 0) { Write-Host "  No owner                : $totalNoOwner" -ForegroundColor Yellow }
     if ($totalMulti   -gt 0) { Write-Host "  Multi-tenant            : $totalMulti"   -ForegroundColor Yellow }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    foreach ($entry in ($results | Where-Object { $_.IsPrivileged -eq "Yes" -and $_.HasOwner -eq "No" })) {
+        Add-Finding -Category "App Registrations" -Severity "High" `
+            -Title "Privileged app without owner: $($entry.AppDisplayName)" `
+            -Detail "This app holds elevated permissions ($($entry.PrivilegedPermissions -replace ';',', ')) and has no assigned owner — no one is accountable for it." `
+            -Recommendation "Assign an owner to this app registration and review whether all permissions are still required."
+    }
+    foreach ($entry in ($results | Where-Object { $_.IsPrivileged -eq "No" -and $_.HasOwner -eq "No" })) {
+        Add-Finding -Category "App Registrations" -Severity "Low" `
+            -Title "App without owner: $($entry.AppDisplayName)" `
+            -Detail "No owner assigned — accountability and lifecycle management are absent." `
+            -Recommendation "Assign an owner to ensure the app registration is maintained."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_AppRegistrationAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -780,6 +839,32 @@ function Invoke-AppRegistrationExpiry {
             $c = if ($_ -in "EXPIRED","CRITICAL") { "Red" } elseif ($_ -in "WARNING","NOTICE") { "Yellow" } else { "Green" }
             Write-Host ("  {0,-8}: {1}" -f $_, $cnt) -ForegroundColor $c
         }
+    }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    foreach ($entry in ($results | Where-Object Status -eq "EXPIRED")) {
+        Add-Finding -Category "Credential Expiry" -Severity "Critical" `
+            -Title "Expired credential: $($entry.AppDisplayName)" `
+            -Detail "$($entry.Type) '$($entry.Name)' expired on $($entry.EndDate). Authentication using this credential is failing." `
+            -Recommendation "Renew or replace this credential immediately to restore service."
+    }
+    foreach ($entry in ($results | Where-Object Status -eq "CRITICAL")) {
+        Add-Finding -Category "Credential Expiry" -Severity "Critical" `
+            -Title "Credential expiring in $($entry.DaysRemaining) day$(if ($entry.DaysRemaining -ne 1) {'s'}): $($entry.AppDisplayName)" `
+            -Detail "$($entry.Type) '$($entry.Name)' expires $($entry.EndDate). Service disruption imminent." `
+            -Recommendation "Renew this credential before $($entry.EndDate) to prevent outage."
+    }
+    foreach ($entry in ($results | Where-Object Status -eq "WARNING")) {
+        Add-Finding -Category "Credential Expiry" -Severity "High" `
+            -Title "Credential expiring in $($entry.DaysRemaining) day$(if ($entry.DaysRemaining -ne 1) {'s'}): $($entry.AppDisplayName)" `
+            -Detail "$($entry.Type) '$($entry.Name)' expires $($entry.EndDate)." `
+            -Recommendation "Plan and execute renewal within the next $($entry.DaysRemaining) days."
+    }
+    foreach ($entry in ($results | Where-Object Status -eq "NOTICE")) {
+        Add-Finding -Category "Credential Expiry" -Severity "Medium" `
+            -Title "Credential expiring in $($entry.DaysRemaining) day$(if ($entry.DaysRemaining -ne 1) {'s'}): $($entry.AppDisplayName)" `
+            -Detail "$($entry.Type) '$($entry.Name)' expires $($entry.EndDate)." `
+            -Recommendation "Schedule renewal to avoid a future incident."
     }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_AppRegistrationExpiry_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
@@ -867,6 +952,20 @@ function Invoke-DeviceExport {
     if ($totalStale        -gt 0) { Write-Host "  Stale (>$StaleDays days): $totalStale"         -ForegroundColor Red    }
     if ($totalDisabled     -gt 0) { Write-Host "  Disabled        : $totalDisabled"   -ForegroundColor Red    }
     if ($totalNonCompliant -gt 0) { Write-Host "  Non-compliant   : $totalNonCompliant" -ForegroundColor Yellow }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($totalStale -gt 0) {
+        Add-Finding -Category "Devices" -Severity "Medium" `
+            -Title "$totalStale stale device$(if ($totalStale -ne 1) {'s'}) (>$StaleDays days inactive)" `
+            -Detail "Stale devices may represent unmanaged or abandoned endpoints with outdated security posture." `
+            -Recommendation "Investigate stale devices and disable or delete objects that are no longer in active use."
+    }
+    if ($totalNonCompliant -gt 0) {
+        Add-Finding -Category "Devices" -Severity "Medium" `
+            -Title "$totalNonCompliant non-compliant device$(if ($totalNonCompliant -ne 1) {'s'})" `
+            -Detail "Non-compliant devices may be accessing corporate resources without meeting security requirements." `
+            -Recommendation "Enforce Intune compliance policies and configure Conditional Access to block non-compliant devices."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_DeviceExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -1045,6 +1144,22 @@ function Invoke-RolePolicies {
 
     Write-Host ""
     Write-Host "  Total role policies: $($results.Count)" -ForegroundColor Cyan
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    $noMFA           = ($results | Where-Object { $_.Activation_RequireMFA           -eq $false }).Count
+    $noJustification = ($results | Where-Object { $_.Activation_RequireJustification -eq $false }).Count
+    if ($noMFA -gt 0) {
+        Add-Finding -Category "PIM Role Policies" -Severity "High" `
+            -Title "$noMFA role$(if ($noMFA -ne 1) {'s'}) do not require MFA on activation" `
+            -Detail "Privileged roles can be activated without completing multi-factor authentication, lowering the bar for privilege escalation." `
+            -Recommendation "Enable MFA as an activation requirement on all PIM-managed roles."
+    }
+    if ($noJustification -gt 0) {
+        Add-Finding -Category "PIM Role Policies" -Severity "Medium" `
+            -Title "$noJustification role$(if ($noJustification -ne 1) {'s'}) do not require justification on activation" `
+            -Detail "No business justification is captured when these roles are activated, limiting the audit trail." `
+            -Recommendation "Enable justification requirement on all PIM-managed roles to maintain accountability."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_RolePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -1330,6 +1445,17 @@ function Invoke-PIMSecurityAlerts {
     if ($high   -gt 0) { Write-Host "  High severity    : $high"   -ForegroundColor Red    }
     if ($medium -gt 0) { Write-Host "  Medium severity  : $medium" -ForegroundColor Yellow }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    foreach ($alert in $activeAlerts) {
+        $sev = switch ($alert.Severity) { "high" { "High" } "medium" { "Medium" } default { "Low" } }
+        $detail = if ($alert.SecurityImpact -ne "—") { $alert.SecurityImpact.Substring(0, [Math]::Min(200, $alert.SecurityImpact.Length)) } else { "$($alert.IncidentCount) incident(s) detected." }
+        $rec    = if ($alert.HowToPrevent   -ne "—") { $alert.HowToPrevent.Substring(0,   [Math]::Min(200, $alert.HowToPrevent.Length))   } else { "Review and remediate this alert in the Entra ID PIM portal." }
+        Add-Finding -Category "PIM Security Alerts" -Severity $sev `
+            -Title $alert.DisplayName `
+            -Detail $detail `
+            -Recommendation $rec
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_PIMSecurityAlerts_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -1419,6 +1545,15 @@ function Invoke-FindInactiveDevices {
     Write-Host "  Inactive devices (>$threshold days): $($results.Count)" -ForegroundColor Yellow
     if ($neverSeen -gt 0) { Write-Host "  Never seen: $neverSeen" -ForegroundColor Red }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($results.Count -gt 0) {
+        $neverNote = if ($neverSeen -gt 0) { " $neverSeen device(s) have never been seen at all." } else { "" }
+        Add-Finding -Category "Devices" -Severity "Low" `
+            -Title "$($results.Count) device$(if ($results.Count -ne 1) {'s'}) inactive for more than $threshold days" `
+            -Detail "Inactive devices consume licenses and expand the attack surface.$neverNote" `
+            -Recommendation "Review the inactive device list and disable or delete devices no longer in use."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_InactiveDevices_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -1493,6 +1628,15 @@ function Invoke-FindInactiveUsers {
     Write-Host "  Total users              : $($results.Count)"      -ForegroundColor Cyan
     Write-Host "  Inactive (>$threshold days): $inactive"            -ForegroundColor Yellow
     if ($neverSeen -gt 0) { Write-Host "  Never seen               : $neverSeen" -ForegroundColor Red }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    $inactiveEnabled = ($results | Where-Object { $_.IsInactive -eq "True" -and $_.AccountEnabled -eq "True" }).Count
+    if ($inactiveEnabled -gt 0) {
+        Add-Finding -Category "Identity" -Severity "Medium" `
+            -Title "$inactiveEnabled enabled account$(if ($inactiveEnabled -ne 1) {'s'}) inactive for more than $threshold days" `
+            -Detail "Enabled accounts with no sign-in activity are orphaned credentials that could be exploited if compromised." `
+            -Recommendation "Disable or delete accounts that are no longer actively used."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_InactiveUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -2145,6 +2289,19 @@ function Invoke-SecurityDefaultsStatus {
         Note                    = if ($isEnabled) { "Security Defaults active — CA policies are bypassed" } else { "Security Defaults disabled — verify CA policies are in place" }
     }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($isEnabled) {
+        Add-Finding -Category "Identity Security" -Severity "Info" `
+            -Title "Security Defaults are enabled" `
+            -Detail "Security Defaults enforce baseline MFA for all users but bypass Conditional Access policies entirely." `
+            -Recommendation "If using Conditional Access for granular control, consider disabling Security Defaults."
+    } else {
+        Add-Finding -Category "Identity Security" -Severity "Info" `
+            -Title "Security Defaults are disabled" `
+            -Detail "Security Defaults are off. Protection relies entirely on Conditional Access policies being correctly configured." `
+            -Recommendation "Verify that Conditional Access policies cover all MFA and access control requirements."
+    }
+
     Write-CsvBom -Data @($result) -Path (Join-Path $script:ExportFolder "AuditSuite_SecurityDefaults_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -2202,6 +2359,26 @@ function Invoke-ExternalCollaborationSettings {
         UsersCanCreateSecurityGroups  = $perms.AllowedToCreateSecurityGroups.ToString()
         UsersCanCreateTenants         = $perms.AllowedToCreateTenants.ToString()
         UsersCanReadOtherUsers        = $perms.AllowedToReadOtherUsers.ToString()
+    }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($authPolicy.AllowInvitesFrom -in @("everyone","adminsGuestInvitersAndAllMembers")) {
+        Add-Finding -Category "External Collaboration" -Severity "Medium" `
+            -Title "Guest invitations permitted for: $inviteLabel" `
+            -Detail "Broad invite permissions increase the risk of uncontrolled external access to tenant resources." `
+            -Recommendation "Restrict guest invitations to Admins and Guest Inviters only."
+    }
+    if ($authPolicy.GuestUserRoleId -eq "a0b1b346-4d3e-4e8b-98f8-753987be4970") {
+        Add-Finding -Category "External Collaboration" -Severity "High" `
+            -Title "Guest users configured with full member-level access" `
+            -Detail "External guest accounts have Member permissions, granting them broad visibility into the directory." `
+            -Recommendation "Change the guest user role to 'Guest (limited access)' to restrict external user permissions."
+    }
+    if ($perms.AllowedToCreateTenants) {
+        Add-Finding -Category "External Collaboration" -Severity "Low" `
+            -Title "Regular users can create new Microsoft tenants" `
+            -Detail "Any member can spin up a new tenant, which may lead to shadow IT or uncontrolled data flows." `
+            -Recommendation "Disable 'Users can create tenants' in External Collaboration Settings."
     }
 
     Write-CsvBom -Data @($result) -Path (Join-Path $script:ExportFolder "AuditSuite_ExternalCollaboration_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
@@ -2431,6 +2608,20 @@ function Invoke-RiskyUsersReport {
     if ($medium -gt 0) { Write-Host "  Medium           : $medium" -ForegroundColor Yellow    }
     if ($low    -gt 0) { Write-Host "  Low              : $low"    -ForegroundColor DarkYellow }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($high -gt 0) {
+        Add-Finding -Category "Identity Risk" -Severity "Critical" `
+            -Title "$high user$(if ($high -ne 1) {'s'}) at high identity risk" `
+            -Detail "High-risk users have been flagged by Entra ID Protection as likely compromised. Immediate action required." `
+            -Recommendation "Force password reset, revoke all active sessions, and investigate sign-in activity for each high-risk user."
+    }
+    if ($medium -gt 0) {
+        Add-Finding -Category "Identity Risk" -Severity "High" `
+            -Title "$medium user$(if ($medium -ne 1) {'s'}) at medium identity risk" `
+            -Detail "Medium-risk users show signs of suspicious activity requiring review." `
+            -Recommendation "Investigate sign-in activity for each medium-risk user and take remediation action where appropriate."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_RiskyUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -2523,6 +2714,20 @@ function Invoke-RiskDetectionsReport {
     if ($high   -gt 0) { Write-Host "  High risk        : $high"   -ForegroundColor Red    }
     if ($medium -gt 0) { Write-Host "  Medium risk      : $medium" -ForegroundColor Yellow }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($high -gt 0) {
+        Add-Finding -Category "Identity Risk" -Severity "Critical" `
+            -Title "$high high-risk detection$(if ($high -ne 1) {'s'}) in the last $lookback days" `
+            -Detail "High-risk events detected: may include leaked credentials, impossible travel, or confirmed compromise." `
+            -Recommendation "Review each high-risk detection immediately and remediate affected accounts."
+    }
+    if ($medium -gt 0) {
+        Add-Finding -Category "Identity Risk" -Severity "High" `
+            -Title "$medium medium-risk detection$(if ($medium -ne 1) {'s'}) in the last $lookback days" `
+            -Detail "Medium-risk events detected: suspicious sign-in properties or atypical activity patterns." `
+            -Recommendation "Investigate medium-risk detections and apply remediation where warranted."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_RiskDetections_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -2609,6 +2814,15 @@ function Invoke-SecureScoreReport {
         Write-Host ("  {0,-58} {1,5}/{2,-5} ({3}%)" -f $entry.Title, $entry.Score, $entry.MaxScore, $entry.ScorePct) -ForegroundColor $c
     }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    $sev = if ($pct -ge 80) { "Info" } elseif ($pct -ge 50) { "Medium" } else { "High" }
+    $comparison = if ($allAvg) { " All-tenants average: $([math]::Round($allAvg,1))%." } else { "" }
+    $comparison += if ($industryAvg) { " Industry average: $([math]::Round($industryAvg,1))%." } else { "" }
+    Add-Finding -Category "Secure Score" -Severity $sev `
+        -Title "Microsoft Secure Score: $current / $max ($pct%)" `
+        -Detail "Overall security posture score as of $date.$comparison" `
+        -Recommendation "Review the top improvement actions in the Microsoft Secure Score portal to increase the score."
+
     Write-CsvBom -Data ($results | Sort-Object Category, Title) -Path (Join-Path $script:ExportFolder "AuditSuite_SecureScore_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -2651,6 +2865,112 @@ function Invoke-M365UsageReports {
 
     Write-Host ""
     Write-Host "  Note: User/site names may be anonymized depending on tenant privacy settings in the M365 admin center." -ForegroundColor DarkGray
+}
+
+# ── Executive Report ──────────────────────────────────────────────────────────
+function Invoke-ExecutiveReport {
+    param([string]$TenantName)
+
+    Write-Host ""
+    Write-Host "  Running: Executive Report" -ForegroundColor Cyan
+
+    if ($script:Findings.Count -eq 0) {
+        Write-Host "  No findings collected — executive report skipped." -ForegroundColor DarkGray
+        return
+    }
+
+    $reportDate = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+
+    $critical = ($script:Findings | Where-Object Severity -eq "Critical").Count
+    $high     = ($script:Findings | Where-Object Severity -eq "High").Count
+    $medium   = ($script:Findings | Where-Object Severity -eq "Medium").Count
+    $low      = ($script:Findings | Where-Object Severity -eq "Low").Count
+    $info     = ($script:Findings | Where-Object Severity -eq "Info").Count
+
+    $overallRisk  = if ($critical -gt 0) { "CRITICAL" } elseif ($high -gt 0) { "HIGH" } elseif ($medium -gt 0) { "MEDIUM" } elseif ($low -gt 0) { "LOW" } else { "GOOD" }
+    $bannerColor  = switch ($overallRisk) { "CRITICAL" { "#b71c1c" } "HIGH" { "#e65100" } "MEDIUM" { "#f9a825" } "LOW" { "#558b2f" } default { "#1b5e20" } }
+
+    $severityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3; "Info" = 4 }
+    $sorted = $script:Findings | Sort-Object { $severityOrder[$_.Severity] }, Category, Title
+
+    function hesc { param([string]$s); $s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' }
+
+    $rows = foreach ($f in $sorted) {
+        $bg = switch ($f.Severity) {
+            "Critical" { "#b71c1c" } "High" { "#e65100" } "Medium" { "#f9a825" }
+            "Low"      { "#558b2f" } "Info" { "#1565c0" } default  { "#757575" }
+        }
+        "<tr><td><span class='badge' style='background:$bg'>$(hesc $f.Severity)</span></td><td>$(hesc $f.Category)</td><td><strong>$(hesc $f.Title)</strong></td><td>$(hesc $f.Detail)</td><td>$(hesc $f.Recommendation)</td></tr>"
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>M365 Security Executive Report - $TenantName</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#f4f6f8;color:#1a1a2e;font-size:14px}
+.hdr{background:#0d47a1;color:#fff;padding:28px 40px 20px}
+.hdr h1{font-size:22px;font-weight:300;letter-spacing:.5px}
+.hdr .sub{margin-top:6px;opacity:.75;font-size:12px}
+.banner{background:$bannerColor;color:#fff;padding:10px 40px;font-size:13px;font-weight:700;letter-spacing:1px}
+.body{padding:28px 40px}
+.cards{display:flex;gap:14px;margin-bottom:28px;flex-wrap:wrap}
+.card{background:#fff;border-radius:6px;padding:18px 20px;flex:1;min-width:100px;box-shadow:0 1px 4px rgba(0,0,0,.1);text-align:center;border-top:4px solid #ccc}
+.card.c{border-color:#b71c1c}.card.h{border-color:#e65100}.card.m{border-color:#f9a825}.card.l{border-color:#558b2f}.card.i{border-color:#1565c0}
+.card .n{font-size:34px;font-weight:700;line-height:1}
+.card.c .n{color:#b71c1c}.card.h .n{color:#e65100}.card.m .n{color:#f9a825}.card.l .n{color:#558b2f}.card.i .n{color:#1565c0}
+.card .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:#666;margin-top:4px}
+h2{font-size:15px;font-weight:600;color:#0d47a1;margin-bottom:14px}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+thead tr{background:#e3f2fd}
+th{padding:11px 14px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#0d47a1;font-weight:600}
+td{padding:11px 14px;border-top:1px solid #f0f0f0;vertical-align:top;line-height:1.45}
+tr:hover td{background:#fafafa}
+td:nth-child(4){color:#333;font-size:13px}
+td:nth-child(5){color:#0d47a1;font-size:13px}
+.badge{display:inline-block;padding:2px 9px;border-radius:10px;color:#fff;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+.footer{margin-top:28px;font-size:11px;color:#999;text-align:center;padding-bottom:28px}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>M365 Security Executive Report</h1>
+  <div class="sub">Tenant: <strong>$TenantName</strong> &nbsp;&bull;&nbsp; Generated: $reportDate &nbsp;&bull;&nbsp; M365AuditSuite</div>
+</div>
+<div class="banner">Overall Risk Level: $overallRisk &nbsp;&bull;&nbsp; $($script:Findings.Count) finding$(if ($script:Findings.Count -ne 1) {'s'}) identified</div>
+<div class="body">
+  <div class="cards">
+    <div class="card c"><div class="n">$critical</div><div class="lbl">Critical</div></div>
+    <div class="card h"><div class="n">$high</div><div class="lbl">High</div></div>
+    <div class="card m"><div class="n">$medium</div><div class="lbl">Medium</div></div>
+    <div class="card l"><div class="n">$low</div><div class="lbl">Low</div></div>
+    <div class="card i"><div class="n">$info</div><div class="lbl">Info</div></div>
+  </div>
+  <h2>Findings</h2>
+  <table>
+    <thead><tr><th style="width:85px">Severity</th><th style="width:155px">Category</th><th style="width:210px">Finding</th><th>Detail</th><th style="width:210px">Recommendation</th></tr></thead>
+    <tbody>
+      $($rows -join "`n      ")
+    </tbody>
+  </table>
+  <div class="footer">Generated by M365AuditSuite &nbsp;&bull;&nbsp; $reportDate &nbsp;&bull;&nbsp; For internal use only</div>
+</div>
+</body>
+</html>
+"@
+
+    $reportPath = Join-Path $script:ExportFolder "AuditSuite_ExecutiveReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+    try {
+        [System.IO.File]::WriteAllText($reportPath, $html, (New-Object System.Text.UTF8Encoding $false))
+        Write-Host "  Executive report : $reportPath" -ForegroundColor Green
+        $riskColor = if ($critical -gt 0) { "Red" } elseif ($high -gt 0) { "Yellow" } elseif ($medium -gt 0) { "DarkYellow" } else { "Green" }
+        Write-Host ("  Risk level       : $overallRisk  |  Critical: $critical  High: $high  Medium: $medium  Low: $low  Info: $info") -ForegroundColor $riskColor
+    } catch {
+        Write-Host "  Failed to write executive report: $_" -ForegroundColor Red
+    }
 }
 
 # ===========================================================================
@@ -2814,6 +3134,7 @@ try {
     if ($runAll -or $choice -eq "26") { Invoke-RiskDetectionsReport -Days     $(if ($runAll) { 30    } else { 0    }) }
     if ($runAll -or $choice -eq "27") { Invoke-SecureScoreReport                                                      }
     if ($runAll -or $choice -eq "28") { Invoke-M365UsageReports    -Period    $(if ($runAll) { "D30" } else { ""   }) }
+    if ($runAll)                      { Invoke-ExecutiveReport -TenantName $tenantChoice.Name }
 } catch {
     Write-Host ""
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
