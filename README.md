@@ -6,6 +6,8 @@ A collection of PowerShell scripts for Microsoft 365 / Entra ID administration, 
 **Organization:** PSBV  
 **Auth model:** Certificate-based app-only authentication throughout (except Infrastructure scripts which use interactive Azure login)
 
+> **Before you use these scripts:** the `TenantId`, `AppId`, and `CertificateThumbprint` values hardcoded in each script are specific to the author's environment and will not work in yours. Replace them with your own app registration details before running anything. See the [Requirements](#requirements) section for what you need to set up.
+
 ---
 
 ## Folder structure
