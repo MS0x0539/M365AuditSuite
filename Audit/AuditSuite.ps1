@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Entra / M365 audit suite — twenty-eight reports in one interactive script.
+    Entra / M365 audit suite — twenty-eight reports in one interactive script, plus an HTML executive report when running all.
 
 .DESCRIPTION
     Presents a menu to run any of the following audit reports:

@@ -1,5 +1,7 @@
 # M365AuditSuite
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A collection of PowerShell scripts for Microsoft 365 / Entra ID administration, security auditing, PIM management, and account lifecycle automation.
 
 **Author:** Melih Sivrikaya  

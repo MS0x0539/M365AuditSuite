@@ -460,7 +460,6 @@ foreach ($module in @(
     "EasyPIM"
 )) {
     try {
-        Install-Module $module -ErrorAction Stop
         Import-Module $module -ErrorAction Stop
         Write-Host "  Loaded: $module" -ForegroundColor Green
     } catch {
