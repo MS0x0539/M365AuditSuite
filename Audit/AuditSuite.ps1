@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Entra / M365 audit suite — twenty-eight reports in one interactive script, plus an HTML executive report when running all.
+    Entra / M365 audit suite — thirty-two reports in one interactive script, plus an HTML executive report when running all.
 
 .DESCRIPTION
     Presents a menu to run any of the following audit reports:
@@ -89,9 +89,27 @@
       [28] M365 Usage Reports
            Active users, email activity, Teams usage, OneDrive and SharePoint usage by selected period.
 
+      [29] Password Never Expires
+           All enabled accounts with DisablePasswordExpiration set — including accounts that also have
+           DisableStrongPassword (weakest possible configuration). Sorted by days since last password change.
+
+      [30] Guest Users with Privileged Roles
+           Cross-references all guest/external accounts against active and PIM-eligible Entra ID role
+           assignments. Any guest holding a directory role is flagged as a critical finding.
+
+      [31] Legacy Authentication Sign-ins
+           Recent sign-in events using legacy protocols (Exchange ActiveSync, IMAP4, POP3, SMTP,
+           MAPI over HTTP, Exchange Web Services, etc.) that bypass Conditional Access and MFA.
+           Configurable lookback in days.
+
+      [32] Authentication Method Adoption
+           Tenant-wide count of users registered per authentication method (FIDO2, Microsoft Authenticator,
+           software OATH, SMS, Windows Hello for Business, Temporary Access Pass, etc.).
+
       [A]  Run all reports + interactive HTML executive report
-           Runs all 28 reports with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days,
-           usage: D30), then generates an interactive single-page HTML executive report alongside the CSVs.
+           Runs all 32 reports with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days,
+           legacy auth: 30 days, usage: D30), then generates an interactive single-page HTML executive
+           report alongside the CSVs.
            The report features CVSS-range severity score gauges, clickable severity cards that filter the
            findings list, a category breakdown bar chart, findings grouped by category in collapsible sections,
            expandable per-finding detail and recommendation panels, a search box, severity and category
@@ -132,6 +150,8 @@
                   Microsoft.Graph.Reports
 
     Notes       : [25] and [26] will fail gracefully if the tenant does not have Entra ID P2.
+                  [31] Sign-in logs are typically retained for 30 days (Entra ID P1) or 90 days (P2).
+                       Legacy auth sign-ins are only visible if they occurred within the retention window.
                   [26] User and site names in usage reports may appear as hashed IDs if the tenant
                   has "Conceal user, group, and site names in all reports" enabled. This is a
                   tenant-level privacy setting found in M365 Admin Center → Settings → Org settings
@@ -604,6 +624,13 @@ function Invoke-CAAccessReport {
             -Detail "Disabled policies provide no protection whatsoever." `
             -Recommendation "Review disabled policies and enable or remove them."
     }
+    $mfaEnforcing = ($results | Where-Object { $_.State -eq "Enabled" -and $_.GrantControls -match "Require MFA" }).Count
+    if ($mfaEnforcing -eq 0) {
+        Add-Finding -Category "Conditional Access" -Severity "High" `
+            -Title "No enabled Conditional Access policy enforces MFA" `
+            -Detail "None of the enabled CA policies have MFA as a grant control. Users can authenticate to any application without completing multi-factor authentication." `
+            -Recommendation "Create or enable a CA policy that requires MFA for all users. At minimum, ensure all administrators are covered by an MFA-enforcing policy."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_CAAccessReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -1055,6 +1082,18 @@ function Invoke-RoleAssignments {
     Write-Host ""
     Write-Host "  Total assignments: $($results.Count)  |  Active: $(($results | Where-Object AssignmentType -eq 'Active').Count)  |  Eligible: $(($results | Where-Object AssignmentType -eq 'Eligible').Count)" -ForegroundColor Cyan
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    $permGAs = $results | Where-Object {
+        $_.AssignmentType -eq "Active" -and $_.UserPrincipalName -and $_.RoleDisplayName -eq "Global Administrator"
+    }
+    if ($permGAs.Count -gt 0) {
+        $gaList = ($permGAs | Select-Object -ExpandProperty UserPrincipalName) -join ", "
+        Add-Finding -Category "Role Assignments" -Severity "High" `
+            -Title "$($permGAs.Count) user$(if ($permGAs.Count -ne 1) {'s'}) with a permanent standing Global Administrator assignment" `
+            -Detail "These users hold Global Administrator via a direct active assignment rather than PIM just-in-time activation. Standing assignments bypass PIM's approval, time-limit, and audit trail. Accounts: $gaList" `
+            -Recommendation "Convert all permanent Global Administrator assignments to PIM-eligible. Only dedicated break-glass accounts should hold standing Global Admin access, and those should be excluded from normal sign-in."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_RoleAssignments_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -1165,6 +1204,21 @@ function Invoke-RolePolicies {
             -Title "$noJustification role$(if ($noJustification -ne 1) {'s'}) do not require justification on activation" `
             -Detail "No business justification is captured when these roles are activated, limiting the audit trail." `
             -Recommendation "Enable justification requirement on all PIM-managed roles to maintain accountability."
+    }
+    $longDuration = $results | Where-Object {
+        $d = $_.Activation_MaxDuration
+        if (-not $d) { return $false }
+        if ($d -match 'P(\d+)D')   { [int]$Matches[1] * 24 -gt 8 }
+        elseif ($d -match 'PT(\d+)H') { [int]$Matches[1] -gt 8 }
+        else { $false }
+    }
+    if ($longDuration.Count -gt 0) {
+        $roleList = ($longDuration | Select-Object -ExpandProperty RoleName | Select-Object -First 5) -join ", "
+        if ($longDuration.Count -gt 5) { $roleList += " and $($longDuration.Count - 5) more" }
+        Add-Finding -Category "PIM Role Policies" -Severity "Low" `
+            -Title "$($longDuration.Count) role$(if ($longDuration.Count -ne 1) {'s'}) allow activation duration longer than 8 hours" `
+            -Detail "Long activation windows reduce the effectiveness of just-in-time access controls and increase the window of exposure if an activation is misused. Roles: $roleList." `
+            -Recommendation "Set maximum activation duration to 8 hours or less for all privileged roles."
     }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_RolePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
@@ -1701,6 +1755,15 @@ function Invoke-DomainExport {
     if ($unverified -gt 0) { Write-Host "  Unverified     : $unverified" -ForegroundColor Yellow }
     if ($federated  -gt 0) { Write-Host "  Federated      : $federated"  -ForegroundColor Cyan   }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($unverified -gt 0) {
+        $uvNames = ($results | Where-Object { $_.IsVerified -eq "False" } | Select-Object -ExpandProperty DomainName) -join ", "
+        Add-Finding -Category "Domains" -Severity "Low" `
+            -Title "$unverified unverified domain$(if ($unverified -ne 1) {'s'}) registered in the tenant" `
+            -Detail "The following domain$(if ($unverified -ne 1) {'s are'} else {' is'}) registered but DNS ownership has not been confirmed: $uvNames. Unverified domains cannot be used for user UPNs or services." `
+            -Recommendation "Verify ownership by adding the required DNS TXT records, or remove domains that are no longer needed."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_DomainExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -1766,6 +1829,28 @@ function Invoke-GuestUserReport {
     Write-Host "  Total guests     : $($results.Count)" -ForegroundColor Cyan
     if ($pending -gt 0) { Write-Host "  Pending acceptance: $pending" -ForegroundColor Yellow }
     if ($never   -gt 0) { Write-Host "  Never signed in  : $never"    -ForegroundColor Red    }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($pending -gt 0) {
+        Add-Finding -Category "Guest Access" -Severity "Medium" `
+            -Title "$pending guest invitation$(if ($pending -ne 1) {'s'}) pending acceptance" `
+            -Detail "These external users were invited but have never accepted. Pending invitations represent open access grants that have not been acted on and may be forgotten." `
+            -Recommendation "Review all pending invitations. Revoke any that have been outstanding for more than 30 days or where the business need no longer exists."
+    }
+    $neverEnabledGuests = ($results | Where-Object { $_.LastSignIn -eq "Never" -and $_.AccountEnabled -eq "True" -and $_.ExternalUserState -ne "PendingAcceptance" }).Count
+    if ($neverEnabledGuests -gt 0) {
+        Add-Finding -Category "Guest Access" -Severity "Low" `
+            -Title "$neverEnabledGuests enabled guest account$(if ($neverEnabledGuests -ne 1) {'s'}) have never signed in" `
+            -Detail "These guest accounts have been accepted and enabled but the external user has never authenticated. They represent unused standing access that should be reviewed." `
+            -Recommendation "Contact the sponsoring team for each account. Disable or remove guests who have never used their access."
+    }
+    $staleGuests = ($results | Where-Object { $_.DaysSinceSignIn -ne "" -and [int]$_.DaysSinceSignIn -gt 90 }).Count
+    if ($staleGuests -gt 0) {
+        Add-Finding -Category "Guest Access" -Severity "Low" `
+            -Title "$staleGuests guest account$(if ($staleGuests -ne 1) {'s'}) inactive for more than 90 days" `
+            -Detail "These external users have not signed in for over 90 days. Stale guest accounts extend the attack surface and may hold access to resources they no longer need." `
+            -Recommendation "Review inactive guest accounts and disable or remove those no longer required for active collaboration."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_GuestUsers_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -1848,6 +1933,22 @@ function Invoke-GroupExport {
     }
     if ($noOwner        -gt 0) { Write-Host "  No owner         : $noOwner"        -ForegroundColor Yellow }
     if ($roleAssignable -gt 0) { Write-Host "  Role-assignable  : $roleAssignable" -ForegroundColor Cyan   }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    $noOwnerAssigned = ($results | Where-Object { $_.OwnerCount -eq 0 -and $_.MembershipType -eq "Assigned" }).Count
+    if ($noOwnerAssigned -gt 0) {
+        Add-Finding -Category "Group Management" -Severity "Medium" `
+            -Title "$noOwnerAssigned assigned group$(if ($noOwnerAssigned -ne 1) {'s'}) with no owner" `
+            -Detail "Groups without owners have no designated person responsible for membership lifecycle. Access may persist long after it should have been removed, and there is no one to action access reviews." `
+            -Recommendation "Assign at least one owner to every security and Microsoft 365 group. Enable Entra ID group expiration policy to automatically flag ownerless groups for review."
+    }
+    $publicGroups = ($results | Where-Object { $_.Visibility -eq "Public" -and $_.GroupType -notin @("Distribution") }).Count
+    if ($publicGroups -gt 0) {
+        Add-Finding -Category "Group Management" -Severity "Low" `
+            -Title "$publicGroups public group$(if ($publicGroups -ne 1) {'s'}) — membership and content visible to all tenant users" `
+            -Detail "Public Microsoft 365 groups allow any tenant user to view content and join without approval. This may expose internal communications, files, or SharePoint sites unintentionally." `
+            -Recommendation "Review each public group. Change visibility to Private for any group whose membership list or content is not intended to be universally accessible."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_GroupExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -2045,6 +2146,14 @@ function Invoke-EnterpriseAppExport {
     Write-Host "  Third-party      : $thirdParty"       -ForegroundColor Yellow
     if ($disabled -gt 0) { Write-Host "  Disabled         : $disabled" -ForegroundColor DarkGray }
 
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($thirdParty -gt 0) {
+        Add-Finding -Category "Enterprise Applications" -Severity "Low" `
+            -Title "$thirdParty enabled third-party application$(if ($thirdParty -ne 1) {'s'}) present in the tenant" `
+            -Detail "Third-party apps have access to tenant data within the scopes they were granted. Each represents an external dependency and a potential supply-chain or data-exposure risk if left unreviewed." `
+            -Recommendation "Review all third-party apps. Disable or remove apps with no active use case. Ensure every app has a documented owner and that OAuth consent grants are regularly reviewed."
+    }
+
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_EnterpriseApps_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
@@ -2107,6 +2216,27 @@ function Invoke-DelegatedPermissionGrants {
     Write-Host "  Total grants     : $($results.Count)" -ForegroundColor Cyan
     Write-Host "  Admin consent    : $adminConsent"     -ForegroundColor Yellow
     Write-Host "  User consent     : $userConsent"      -ForegroundColor Green
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    $privAdminGrants = $results | Where-Object {
+        $_.ConsentType -eq "Admin (all users)" -and (
+            ($_.Scopes -split '\s+') | Where-Object { $PrivilegedPermissions.Contains($_) }
+        )
+    }
+    if ($privAdminGrants.Count -gt 0) {
+        $appList = ($privAdminGrants | Select-Object -ExpandProperty ClientApp -Unique | Select-Object -First 5) -join ", "
+        if (($privAdminGrants | Select-Object -ExpandProperty ClientApp -Unique).Count -gt 5) { $appList += " and more" }
+        Add-Finding -Category "Delegated Permissions" -Severity "High" `
+            -Title "$($privAdminGrants.Count) admin-consented OAuth grant$(if ($privAdminGrants.Count -ne 1) {'s'}) include privileged delegated scopes" `
+            -Detail "Admin consent was granted to apps with elevated delegated scopes (e.g. Mail.ReadWrite, Files.ReadWrite.All, RoleManagement.ReadWrite). Affected apps: $appList." `
+            -Recommendation "Review each admin-consented grant. Revoke or reduce scope for any app that does not have a documented business requirement for privileged delegated access."
+    }
+    if ($userConsent -gt 0) {
+        Add-Finding -Category "Delegated Permissions" -Severity "Medium" `
+            -Title "$userConsent user-consented OAuth grant$(if ($userConsent -ne 1) {'s'}) present — user consent is enabled" `
+            -Detail "Individual users have consented to OAuth scopes without admin approval. This indicates user consent is not disabled, and may result in apps accessing tenant data without IT oversight." `
+            -Recommendation "Restrict or disable user consent in Entra ID → Enterprise Apps → Consent and Permissions. Require admin approval for all app consent requests to maintain visibility and control."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_DelegatedPermissionGrants_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -2478,6 +2608,10 @@ function Invoke-IntuneCompliancePolicies {
 
     if ($policies.Count -eq 0) {
         Write-Host "  No compliance policies found." -ForegroundColor Yellow
+        Add-Finding -Category "Intune Compliance" -Severity "Medium" `
+            -Title "No Intune compliance policies exist in the tenant" `
+            -Detail "Without compliance policies, all devices are considered compliant by default. Conditional Access policies enforcing compliant device requirements will not function as intended." `
+            -Recommendation "Create compliance policies for each managed platform (Windows, iOS, Android, macOS) and assign them to the appropriate device groups."
         return
     }
 
@@ -2546,6 +2680,16 @@ function Invoke-IntuneCompliancePolicies {
         Write-Host ("  {0,-20}: {1}" -f $_.Name, $_.Count) -ForegroundColor Cyan
     }
     if ($unassigned -gt 0) { Write-Host "  Not assigned     : $unassigned" -ForegroundColor Yellow }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($unassigned -gt 0) {
+        $unassignedNames = ($results | Where-Object { $_.AssignmentCount -eq 0 } | Select-Object -ExpandProperty PolicyName | Select-Object -First 5) -join ", "
+        if ($unassigned -gt 5) { $unassignedNames += " and $($unassigned - 5) more" }
+        Add-Finding -Category "Intune Compliance" -Severity "Low" `
+            -Title "$unassigned compliance polic$(if ($unassigned -ne 1) {'ies'} else {'y'}) exist but $(if ($unassigned -ne 1) {'are'} else {'is'}) not assigned to any group" `
+            -Detail "Unassigned compliance policies have no effect — devices are not evaluated against them. Policies: $unassignedNames." `
+            -Recommendation "Assign each compliance policy to the appropriate device group, or remove policies that are no longer needed to reduce configuration clutter."
+    }
 
     Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_IntuneCompliancePolicies_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
@@ -3056,11 +3200,48 @@ body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#0e0f14;color:
 .fb-block.rec .fb-txt{color:#6da4e0}
 .no-results{padding:48px;text-align:center;color:#3a3f55;font-size:14px;display:none}
 .footer{margin-top:36px;padding:20px 0;text-align:center;font-size:11px;color:#3a3f55;border-top:1px solid #1a1d28;line-height:1.8}
+/* ── Theme toggle button ── */
+.hdr-right{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.theme-btn{padding:5px 14px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.1);color:#e8eaf6;letter-spacing:.3px;transition:all .18s;white-space:nowrap}
+.theme-btn:hover{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+/* ── Light theme overrides ── */
+body.light{background:#f0f2f5;color:#1a1a2e}
+body.light .statsbar{background:#1a1a2e;color:#ccc}
+body.light .sec-title{color:#888}
+body.light .sev-card{background:#fff;border-color:#e8e8e8;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+body.light .sev-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.13)}
+body.light .sc-range{color:#aaa}
+body.light .cb-name{color:#444}
+body.light .cb-track{background:#e4e4e4}
+body.light .ctrl-input{background:#fff;border-color:#ddd;color:#333}
+body.light .ctrl-input::placeholder{color:#bbb}
+body.light .ctrl-select{background:#fff;border-color:#ddd;color:#333}
+body.light .ctrl-btn{background:#fff;border-color:#ddd;color:#555}
+body.light .ctrl-btn:hover{background:#f0f4ff;border-color:#1976d2;color:#1976d2}
+body.light .filter-count{color:#999}
+body.light .cat-section{background:#fff;border-color:#e8e8e8;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+body.light .cat-hdr:hover{background:#f8faff}
+body.light .toggle-icon{color:#aaa}
+body.light .cat-hdr-name{color:#1a1a2e}
+body.light .cat-hdr-count{color:#aaa}
+body.light .finding{border-top-color:#f3f3f3}
+body.light .finding-hdr:hover{background:#fafafa}
+body.light .finding.open .finding-hdr{background:#f8faff}
+body.light .f-title{color:#222}
+body.light .f-chevron{color:#ccc}
+body.light .finding.open .f-chevron{color:#1976d2}
+body.light .finding-body{background:#f8faff;border-top-color:#eff0f5}
+body.light .fb-lbl{color:#aaa}
+body.light .fb-txt{color:#333}
+body.light .fb-block.rec .fb-lbl{color:#1565c0}
+body.light .fb-block.rec .fb-txt{color:#1565c0}
+body.light .no-results{color:#bbb}
+body.light .footer{color:#bbb;border-top-color:#e8e8e8}
 @media print{
-  .controls,.ctrl-btn{display:none!important}
+  .controls,.ctrl-btn,.theme-btn{display:none!important}
   .finding-body{display:flex!important}
   .cat-section.collapsed .cat-body{display:block!important}
-  body{background:#fff;color:#111}
+  body,body.light{background:#fff;color:#111}
   .cat-section{background:#fff;box-shadow:none;border:1px solid #ddd}
   .finding-hdr,.finding-body{background:#fff!important}
   .hdr{background:#0d2145!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
@@ -3163,7 +3344,23 @@ function collapseAll() {
     });
 }
 
-window.addEventListener('DOMContentLoaded', function() { applyFilters(); });
+function toggleTheme() {
+    var light = document.body.classList.toggle('light');
+    var btn = document.getElementById('themeBtn');
+    if (btn) btn.innerHTML = light ? '&#9790; Dark' : '&#9728; Light';
+    try { localStorage.setItem('auditSuiteTheme', light ? 'light' : 'dark'); } catch(e) {}
+}
+
+window.addEventListener('DOMContentLoaded', function() {
+    applyFilters();
+    try {
+        if (localStorage.getItem('auditSuiteTheme') === 'light') {
+            document.body.classList.add('light');
+            var btn = document.getElementById('themeBtn');
+            if (btn) btn.innerHTML = '&#9790; Dark';
+        }
+    } catch(e) {}
+});
 '@
 
     # ── Assemble HTML ─────────────────────────────────────────────────────────
@@ -3183,7 +3380,10 @@ window.addEventListener('DOMContentLoaded', function() { applyFilters(); });
     <h1>M365 Security Executive Report</h1>
     <div class="sub">Tenant: <strong>$(hesc $TenantName)</strong> &nbsp;&bull;&nbsp; Generated: $reportDate &nbsp;&bull;&nbsp; M365AuditSuite</div>
   </div>
-  <div class="risk-pill" style="border-color:$riskHex">$overallRisk &nbsp;&mdash;&nbsp; $total finding$(if ($total -ne 1) {'s'})</div>
+  <div class="hdr-right">
+    <div class="risk-pill" style="border-color:$riskHex">$overallRisk &nbsp;&mdash;&nbsp; $total finding$(if ($total -ne 1) {'s'})</div>
+    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()">&#9728; Light</button>
+  </div>
 </div>
 
 <div class="statsbar">
@@ -3246,6 +3446,424 @@ window.addEventListener('DOMContentLoaded', function() { applyFilters(); });
     } catch {
         Write-Host "  Failed to write executive report: $_" -ForegroundColor Red
     }
+}
+
+# ── [29] Password Never Expires ───────────────────────────────────────────────
+function Invoke-PasswordNeverExpiresReport {
+    Write-Host ""
+    Write-Host "  Running: Password Never Expires" -ForegroundColor Cyan
+
+    $users = Get-MgUser -All `
+        -Property DisplayName,UserPrincipalName,AccountEnabled,PasswordPolicies,UserType,LastPasswordChangeDateTime `
+        -ErrorAction Stop
+    Write-Host "  Total users      : $($users.Count)" -ForegroundColor DarkGray
+
+    $now     = Get-Date
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($u in $users) {
+        if (-not ($u.PasswordPolicies -and $u.PasswordPolicies -match 'DisablePasswordExpiration')) { continue }
+        $daysSince = $null
+        if ($u.LastPasswordChangeDateTime) {
+            $daysSince = [math]::Floor(($now - $u.LastPasswordChangeDateTime).TotalDays)
+        }
+        $results.Add([PSCustomObject]@{
+            DisplayName           = $u.DisplayName
+            UserPrincipalName     = $u.UserPrincipalName
+            UserType              = if ($u.UserType -eq 'Guest') { 'Guest' } else { 'Member' }
+            AccountEnabled        = $u.AccountEnabled.ToString()
+            PasswordPolicies      = $u.PasswordPolicies
+            DisableStrongPassword = ($u.PasswordPolicies -match 'DisableStrongPassword').ToString()
+            LastPasswordChange    = if ($u.LastPasswordChangeDateTime) { $u.LastPasswordChangeDateTime.ToString('yyyy-MM-dd') } else { 'Never' }
+            DaysSinceChange       = if ($null -ne $daysSince) { $daysSince } else { '' }
+        })
+    }
+
+    $sorted = $results | Sort-Object `
+        @{ Expression = { if ($_.AccountEnabled -eq 'True') { 0 } else { 1 } } },
+        @{ Expression = 'DaysSinceChange'; Descending = $true },
+        'UserPrincipalName'
+
+    Write-Host ""
+    if ($sorted.Count -eq 0) {
+        Write-Host "  No accounts with password-never-expires found." -ForegroundColor Green
+    } else {
+        $hdr = "  {0,-48} {1,-8} {2,-8} {3,-13} {4}" -f "UserPrincipalName","Type","Enabled","LastChanged","DaysSince"
+        Write-Host $hdr -ForegroundColor Gray
+        Write-Host ("  " + "─" * 96) -ForegroundColor DarkGray
+        foreach ($entry in $sorted) {
+            $flags = if ($entry.DisableStrongPassword -eq 'True') { ' [WEAK POLICY — complexity disabled]' } else { '' }
+            $color = if ($entry.AccountEnabled -eq 'False') { 'DarkGray' } elseif ($entry.DisableStrongPassword -eq 'True') { 'Red' } else { 'Cyan' }
+            Write-Host ("  {0,-48} {1,-8} {2,-8} {3,-13} {4}{5}" -f $entry.UserPrincipalName, $entry.UserType, $entry.AccountEnabled, $entry.LastPasswordChange, $entry.DaysSinceChange, $flags) -ForegroundColor $color
+        }
+    }
+
+    $enabled  = ($sorted | Where-Object AccountEnabled -eq 'True').Count
+    $disabled = ($sorted | Where-Object AccountEnabled -eq 'False').Count
+    $weak     = ($sorted | Where-Object DisableStrongPassword -eq 'True').Count
+    Write-Host ""
+    Write-Host "  Total: $($sorted.Count)  |  Enabled: $enabled  |  Disabled: $disabled" -ForegroundColor Cyan
+    if ($weak -gt 0) { Write-Host "  DisableStrongPassword also set: $weak" -ForegroundColor Red }
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    # Note: DisablePasswordExpiration on its own is NOT a security finding.
+    # Microsoft and NIST SP 800-63B both recommend against mandatory password rotation —
+    # frequent expiry leads to weaker, predictable passwords. The real control is MFA/passwordless.
+    # We surface these accounts as Info so admins know which accounts to ensure are MFA-protected.
+    if ($enabled -gt 0) {
+        Add-Finding -Category "Password Policy" -Severity "Info" `
+            -Title "$enabled enabled account$(if ($enabled -ne 1) {'s'}) with password set to never expire" `
+            -Detail "Microsoft and NIST SP 800-63B recommend against mandatory password rotation — non-expiring passwords are acceptable and preferred when strong MFA or passwordless authentication is in place. These accounts are surfaced for awareness so you can confirm each one is protected by MFA or passwordless." `
+            -Recommendation "Verify that each account uses strong MFA (Microsoft Authenticator, FIDO2, or Windows Hello) or is enrolled in a passwordless flow. Do not enable password expiration as a substitute for MFA — consider transitioning service accounts to managed identities or certificate-based authentication."
+    }
+    if ($weak -gt 0) {
+        Add-Finding -Category "Password Policy" -Severity "High" `
+            -Title "$weak account$(if ($weak -ne 1) {'s'}) with DisableStrongPassword set — password complexity is not enforced" `
+            -Detail "These accounts have password complexity requirements disabled (DisableStrongPassword). Without complexity enforcement and without periodic rotation, a weak password can be set and remain indefinitely. This is a genuine credential security risk." `
+            -Recommendation "Remove the DisableStrongPassword policy immediately. Enrol these accounts in MFA or a passwordless method. For service accounts, migrate to managed identities or certificate-based authentication."
+    }
+
+    Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_PasswordNeverExpires_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+}
+
+# ── [30] Guest Users with Privileged Roles ────────────────────────────────────
+function Invoke-GuestPrivilegedRolesReport {
+    Write-Host ""
+    Write-Host "  Running: Guest Users with Privileged Roles" -ForegroundColor Cyan
+
+    $guests = Get-MgUser -All -Filter "userType eq 'Guest'" `
+        -Property Id,DisplayName,UserPrincipalName,AccountEnabled,Mail,CreatedDateTime `
+        -ErrorAction Stop
+    Write-Host "  Guest users      : $($guests.Count)" -ForegroundColor DarkGray
+
+    if ($guests.Count -eq 0) {
+        Write-Host "  No guest users found." -ForegroundColor Green
+        return
+    }
+
+    $guestMap = @{}
+    foreach ($g in $guests) { $guestMap[$g.Id] = $g }
+
+    $roleDefs = Get-MgRoleManagementDirectoryRoleDefinition -All -ErrorAction Stop
+    $roleMap  = @{}
+    foreach ($rd in $roleDefs) { $roleMap[$rd.Id] = $rd.DisplayName; $roleMap[$rd.TemplateId] = $rd.DisplayName }
+
+    $activeAssignments = Get-MgRoleManagementDirectoryRoleAssignment -All -ErrorAction Stop
+    Write-Host "  Active assignments: $($activeAssignments.Count)" -ForegroundColor DarkGray
+
+    $eligibleAssignments = @()
+    try {
+        $eligibleAssignments = Get-MgRoleManagementDirectoryRoleEligibilityScheduleInstance -ExpandProperty "*" -All -ErrorAction Stop
+        Write-Host "  Eligible (PIM)   : $($eligibleAssignments.Count)" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "  WARN: Eligible assignments unavailable — tenant may not have Entra P2." -ForegroundColor Yellow
+    }
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($a in $activeAssignments) {
+        if (-not $guestMap.ContainsKey($a.PrincipalId)) { continue }
+        $guest    = $guestMap[$a.PrincipalId]
+        $roleName = if ($roleMap[$a.RoleDefinitionId]) { $roleMap[$a.RoleDefinitionId] } else { $a.RoleDefinitionId }
+        $results.Add([PSCustomObject]@{
+            AssignmentType    = 'Active'
+            DisplayName       = $guest.DisplayName
+            UserPrincipalName = $guest.UserPrincipalName
+            AccountEnabled    = $guest.AccountEnabled.ToString()
+            Mail              = $guest.Mail
+            RoleName          = $roleName
+            GuestCreatedDate  = if ($guest.CreatedDateTime) { $guest.CreatedDateTime.ToString('yyyy-MM-dd') } else { '' }
+        })
+    }
+
+    foreach ($a in $eligibleAssignments) {
+        if (-not $guestMap.ContainsKey($a.PrincipalId)) { continue }
+        $guest    = $guestMap[$a.PrincipalId]
+        $roleName = if ($a.RoleDefinition -and $a.RoleDefinition.DisplayName) { $a.RoleDefinition.DisplayName } `
+                    elseif ($roleMap[$a.RoleDefinitionId]) { $roleMap[$a.RoleDefinitionId] } `
+                    else { $a.RoleDefinitionId }
+        $results.Add([PSCustomObject]@{
+            AssignmentType    = 'Eligible'
+            DisplayName       = $guest.DisplayName
+            UserPrincipalName = $guest.UserPrincipalName
+            AccountEnabled    = $guest.AccountEnabled.ToString()
+            Mail              = $guest.Mail
+            RoleName          = $roleName
+            GuestCreatedDate  = if ($guest.CreatedDateTime) { $guest.CreatedDateTime.ToString('yyyy-MM-dd') } else { '' }
+        })
+    }
+
+    $sorted = $results | Sort-Object AssignmentType, RoleName, UserPrincipalName
+
+    Write-Host ""
+    if ($sorted.Count -eq 0) {
+        Write-Host "  No guest users with privileged role assignments found." -ForegroundColor Green
+    } else {
+        foreach ($entry in $sorted) {
+            $color = if ($entry.AssignmentType -eq 'Active') { 'Red' } else { 'Yellow' }
+            Write-Host ("  [{0,-8}] {1,-50} {2}" -f $entry.AssignmentType, $entry.RoleName, $entry.UserPrincipalName) -ForegroundColor $color
+        }
+    }
+
+    $activeCount   = ($results | Where-Object AssignmentType -eq 'Active').Count
+    $eligibleCount = ($results | Where-Object AssignmentType -eq 'Eligible').Count
+    Write-Host ""
+    Write-Host "  Total: $($results.Count)  |  Active: $activeCount  |  Eligible: $eligibleCount" -ForegroundColor Cyan
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($activeCount -gt 0) {
+        Add-Finding -Category "Guest Access" -Severity "Critical" `
+            -Title "$activeCount guest account$(if ($activeCount -ne 1) {'s'}) with active Entra ID role assignment$(if ($activeCount -ne 1) {'s'})" `
+            -Detail "Guest users are external identities that should not hold directory roles. Active assignments give immediate standing privileged access to the tenant." `
+            -Recommendation "Remove all role assignments from guest accounts immediately. If elevated access for an external user is required, use a scoped approach with time-limited PIM eligibility and documented approval."
+    }
+    if ($eligibleCount -gt 0) {
+        Add-Finding -Category "Guest Access" -Severity "High" `
+            -Title "$eligibleCount guest account$(if ($eligibleCount -ne 1) {'s'}) eligible for Entra ID role$(if ($eligibleCount -ne 1) {'s'}) via PIM" `
+            -Detail "Guest users have PIM-eligible role assignments — they can self-activate privileged roles on demand without further authorisation." `
+            -Recommendation "Review whether external identities should hold PIM-eligible assignments. Remove unless there is a documented, time-bound, approved business justification."
+    }
+
+    Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_GuestPrivilegedRoles_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+}
+
+# ── [31] Legacy Authentication Sign-ins ───────────────────────────────────────
+function Invoke-LegacyAuthSignInsReport {
+    param([int]$Days = 0)
+    Write-Host ""
+    Write-Host "  Running: Legacy Authentication Sign-ins" -ForegroundColor Cyan
+
+    if ($Days -gt 0) {
+        $lookback = $Days
+        Write-Host "  Lookback         : $lookback days (default)" -ForegroundColor DarkGray
+    } else {
+        $lookback = $null
+        while ($null -eq $lookback) {
+            $inp = Read-Host "  How many days back to check (e.g. 30)"
+            if ($inp -match '^\d+$' -and [int]$inp -gt 0) { $lookback = [int]$inp }
+            else { Write-Host "  Please enter a positive number." -ForegroundColor Yellow }
+        }
+    }
+
+    $since = (Get-Date).AddDays(-$lookback).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    $legacyProtocols = @(
+        'Exchange ActiveSync', 'IMAP4', 'POP3', 'SMTP', 'Authenticated SMTP',
+        'Autodiscover', 'Exchange Web Services', 'MAPI Over HTTP',
+        'Other clients', 'Outlook Anywhere (RPC over HTTP)'
+    )
+
+    $filterParts = $legacyProtocols | ForEach-Object { "clientAppUsed eq '$_'" }
+    $filterStr   = "createdDateTime ge $since and (" + ($filterParts -join " or ") + ")"
+
+    Write-Host "  Querying sign-in logs for legacy authentication..." -ForegroundColor DarkGray
+
+    $signins = [System.Collections.Generic.List[object]]::new()
+    try {
+        $raw = Get-MgAuditLogSignIn -Filter $filterStr -All `
+            -Property CreatedDateTime,UserDisplayName,UserPrincipalName,AppDisplayName,ClientAppUsed,IpAddress,Location,Status,ConditionalAccessStatus `
+            -ErrorAction Stop
+        foreach ($s in $raw) { $signins.Add($s) }
+    } catch {
+        Write-Host "  WARN: Could not retrieve legacy sign-in data. $_" -ForegroundColor Yellow
+    }
+
+    Write-Host "  Legacy sign-ins  : $($signins.Count)" -ForegroundColor DarkGray
+
+    $results = foreach ($s in $signins) {
+        $city    = if ($s.Location -and $s.Location.City)            { $s.Location.City }            else { '' }
+        $country = if ($s.Location -and $s.Location.CountryOrRegion) { $s.Location.CountryOrRegion } else { '' }
+        $loc     = @($city, $country) | Where-Object { $_ } | Join-String -Separator ', '
+        $success = if ($s.Status -and $s.Status.ErrorCode -eq 0) { 'Success' } else { 'Failure' }
+
+        [PSCustomObject]@{
+            CreatedDateTime       = if ($s.CreatedDateTime) { $s.CreatedDateTime.ToString('yyyy-MM-dd HH:mm') } else { '' }
+            UserPrincipalName     = $s.UserPrincipalName
+            UserDisplayName       = $s.UserDisplayName
+            Application           = $s.AppDisplayName
+            LegacyProtocol        = $s.ClientAppUsed
+            IpAddress             = $s.IpAddress
+            Location              = $loc
+            Result                = $success
+            ConditionalAccess     = $s.ConditionalAccessStatus
+        }
+    }
+
+    $sorted = $results | Sort-Object CreatedDateTime -Descending
+
+    Write-Host ""
+    if ($sorted.Count -eq 0) {
+        Write-Host "  No legacy authentication sign-ins found in the last $lookback days." -ForegroundColor Green
+    } else {
+        $hdr = "  {0,-18} {1,-40} {2,-28} {3,-10} {4}" -f "DateTime","UserPrincipalName","Protocol","Result","Location"
+        Write-Host $hdr -ForegroundColor Gray
+        Write-Host ("  " + "─" * 108) -ForegroundColor DarkGray
+        foreach ($entry in $sorted) {
+            $color = if ($entry.Result -eq 'Success') { 'Red' } else { 'DarkGray' }
+            Write-Host ("  {0,-18} {1,-40} {2,-28} {3,-10} {4}" -f $entry.CreatedDateTime, $entry.UserPrincipalName, $entry.LegacyProtocol, $entry.Result, $entry.Location) -ForegroundColor $color
+        }
+
+        Write-Host ""
+        $sorted | Group-Object LegacyProtocol | Sort-Object Count -Descending | ForEach-Object {
+            Write-Host ("  {0,-30}: {1}" -f $_.Name, $_.Count) -ForegroundColor Cyan
+        }
+    }
+
+    $successCount = ($sorted | Where-Object Result -eq 'Success').Count
+    $uniqueUsers  = ($sorted | Select-Object -ExpandProperty UserPrincipalName -Unique).Count
+    Write-Host ""
+    Write-Host "  Total events: $($sorted.Count)  |  Successful: $successCount  |  Unique users: $uniqueUsers" -ForegroundColor Cyan
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    if ($successCount -gt 0) {
+        $protocols = ($sorted | Where-Object Result -eq 'Success' | Group-Object LegacyProtocol | Sort-Object Count -Descending | ForEach-Object { "$($_.Name) ($($_.Count))" }) -join ', '
+        Add-Finding -Category "Legacy Authentication" -Severity "High" `
+            -Title "$successCount successful legacy authentication sign-in$(if ($successCount -ne 1) {'s'}) in the last $lookback days" `
+            -Detail "Legacy protocols do not support modern authentication and bypass Conditional Access policies including MFA. Protocols detected: $protocols." `
+            -Recommendation "Block legacy authentication via Conditional Access (policy targeting 'Exchange ActiveSync clients' and 'Other clients'). Migrate affected users and applications to modern authentication."
+    } elseif ($sorted.Count -gt 0) {
+        Add-Finding -Category "Legacy Authentication" -Severity "Medium" `
+            -Title "$($sorted.Count) failed legacy authentication attempt$(if ($sorted.Count -ne 1) {'s'}) in the last $lookback days" `
+            -Detail "Legacy protocol attempts are being made but are failing — likely blocked by CA policy. Verify the block is intentional and consistently applied." `
+            -Recommendation "Confirm that a Conditional Access policy explicitly blocks legacy authentication for all users with no exclusions."
+    }
+
+    Write-CsvBom -Data $sorted -Path (Join-Path $script:ExportFolder "AuditSuite_LegacyAuthSignIns_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
+}
+
+# ── [32] Authentication Method Adoption ───────────────────────────────────────
+function Invoke-AuthMethodAdoptionReport {
+    Write-Host ""
+    Write-Host "  Running: Authentication Method Adoption" -ForegroundColor Cyan
+
+    $methodLabels = @{
+        # Modern / strong
+        'microsoftAuthenticatorPush'              = 'Microsoft Authenticator (Push)'
+        'microsoftAuthenticatorPasswordless'      = 'Microsoft Authenticator (Passwordless)'
+        'softwareOneTimePasscode'                 = 'Software OATH Token (TOTP App)'
+        'hardwareOneTimePasscode'                 = 'Hardware OATH Token'
+        'windowsHelloForBusiness'                 = 'Windows Hello for Business'
+        'fido2SecurityKey'                        = 'FIDO2 Security Key'
+        'temporaryAccessPass'                     = 'Temporary Access Pass'
+        # Passkey variants
+        'passKeyDeviceBound'                      = 'Passkey — Device-bound'
+        'passKeyDeviceBoundAuthenticator'         = 'Passkey — Device-bound (Authenticator)'
+        'passKeyDeviceBoundWindowsHello'          = 'Passkey — Device-bound (Windows Hello)'
+        'passKeySynced'                           = 'Passkey — Synced'
+        'macOsSecureEnclaveKey'                   = 'macOS Secure Enclave Key'
+        # Weak / legacy
+        'sms'                                     = 'SMS'
+        'voice'                                   = 'Voice Call'
+        'mobilePhone'                             = 'Mobile Phone (SMS/Voice)'
+        'alternateMobilePhone'                    = 'Alternate Mobile Phone (SMS/Voice)'
+        'officePhone'                             = 'Office Phone (Voice)'
+        # Standard / SSPR
+        'email'                                   = 'Email (SSPR only)'
+        'securityQuestion'                        = 'Security Questions (SSPR only)'
+        'externalAuthMethod'                      = 'External Authentication Method'
+        'qrCode'                                  = 'QR Code'
+        'password'                                = 'Password'
+    }
+
+    $secureMethodKeys = @(
+        'microsoftAuthenticatorPush', 'microsoftAuthenticatorPasswordless',
+        'fido2SecurityKey', 'windowsHelloForBusiness', 'softwareOneTimePasscode', 'hardwareOneTimePasscode',
+        'passKeyDeviceBound', 'passKeyDeviceBoundAuthenticator', 'passKeyDeviceBoundWindowsHello',
+        'passKeySynced', 'macOsSecureEnclaveKey'
+    )
+
+    $weakMethodKeys = @('sms', 'voice', 'mobilePhone', 'alternateMobilePhone', 'officePhone')
+
+    $response = $null
+    try {
+        $response = Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/v1.0/reports/authenticationMethods/usersRegisteredByMethod" `
+            -ErrorAction Stop
+    } catch {
+        Write-Host "  WARN: Could not retrieve auth method adoption data. $_" -ForegroundColor Yellow
+        return
+    }
+
+    $counts = if ($response.userRegistrationMethodCounts) { $response.userRegistrationMethodCounts } else { @() }
+
+    # Derive total users from the password entry (every user has a password) — more reliable
+    # than totalUserCount which the API sometimes returns as 0.
+    $pwEntry    = $counts | Where-Object { $_.authenticationMethod -eq 'password' } | Select-Object -First 1
+    $totalUsers = if ($pwEntry -and [int]$pwEntry.userCount -gt 0) {
+        [int]$pwEntry.userCount
+    } elseif ($response.totalUserCount -and [int]$response.totalUserCount -gt 0) {
+        [int]$response.totalUserCount
+    } else {
+        [int](($counts | Measure-Object -Property userCount -Maximum).Maximum)
+    }
+
+    Write-Host "  Total users      : $totalUsers" -ForegroundColor DarkGray
+    Write-Host ""
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($item in ($counts | Sort-Object { [int]$_.userCount } -Descending)) {
+        $key   = $item.authenticationMethod
+        if ($key -eq 'password') { continue }
+        $count = [int]$item.userCount
+        $label = if ($methodLabels[$key]) { $methodLabels[$key] } else { $key }
+        $pct   = if ($totalUsers -gt 0) { [math]::Round(($count / $totalUsers) * 100, 1) } else { 0 }
+        $isSafe = $key -in $secureMethodKeys
+        $isWeak = $key -in $weakMethodKeys
+        $tier   = if ($isSafe) { 'Phishing-resistant / Strong' } elseif ($isWeak) { 'Weak (SMS/Voice)' } else { 'Standard' }
+
+        $results.Add([PSCustomObject]@{
+            Method    = $label
+            MethodKey = $key
+            UserCount = $count
+            UsagePct  = $pct
+            Tier      = $tier
+        })
+
+        if ($count -gt 0) {
+            $barLen = [math]::Max(1, [math]::Round($pct / 2))
+            $bar    = '█' * $barLen
+            $color  = if ($isSafe) { 'Green' } elseif ($isWeak) { 'Yellow' } else { 'Cyan' }
+            Write-Host ("  {0,-48} {1,5} users  {2,5}%  {3}" -f $label, $count, $pct, $bar) -ForegroundColor $color
+        }
+    }
+
+    # Show methods with 0 registrations in muted colour
+    $zeroCount = ($results | Where-Object UserCount -eq 0).Count
+    if ($zeroCount -gt 0) {
+        Write-Host ""
+        Write-Host "  Not registered (0 users):" -ForegroundColor DarkGray
+        foreach ($entry in ($results | Where-Object UserCount -eq 0 | Sort-Object Method)) {
+            Write-Host ("  {0,-48} —" -f $entry.Method) -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  Total users      : $totalUsers" -ForegroundColor Cyan
+
+    # ── Executive findings ────────────────────────────────────────────────────
+    $strongTotal  = ($results | Where-Object { $_.MethodKey -in $secureMethodKeys } | Measure-Object UserCount -Maximum).Maximum
+    if (-not $strongTotal) { $strongTotal = 0 }
+    $weakSmsVoice = ($results | Where-Object { $_.MethodKey -in $weakMethodKeys } | Measure-Object UserCount -Sum).Sum
+    if (-not $weakSmsVoice) { $weakSmsVoice = 0 }
+    $smsVoicePct  = if ($totalUsers -gt 0) { [math]::Round(($weakSmsVoice / $totalUsers) * 100, 1) } else { 0 }
+
+    if ($strongTotal -lt ($totalUsers * 0.5) -and $totalUsers -gt 0) {
+        $strongPct = [math]::Round(($strongTotal / $totalUsers) * 100, 1)
+        Add-Finding -Category "Authentication Methods" -Severity "High" `
+            -Title "Only $strongPct% of users registered a strong authentication method" `
+            -Detail "Fewer than half of all users have registered phishing-resistant or strong MFA methods (Authenticator, FIDO2, WHfB, passkeys, OATH). The remainder rely solely on password or weak secondary factors." `
+            -Recommendation "Drive Microsoft Authenticator or FIDO2/passkey adoption. Use Authentication Strength CA policies to enforce strong methods for privileged access."
+    }
+    if ($weakSmsVoice -gt 0) {
+        Add-Finding -Category "Authentication Methods" -Severity "Medium" `
+            -Title "$weakSmsVoice user$(if ($weakSmsVoice -ne 1) {'s'}) ($smsVoicePct%) registered SMS or voice as an authentication method" `
+            -Detail "SMS and voice call MFA are susceptible to SIM-swapping, SS7 attacks, and real-time phishing proxies. They satisfy basic MFA requirements but provide weaker protection than app-based or hardware methods." `
+            -Recommendation "Migrate SMS/voice users to Microsoft Authenticator or FIDO2 keys. Use Authentication Strength policies to block SMS/voice for privileged roles."
+    }
+
+    Write-CsvBom -Data ($results | Sort-Object UserCount -Descending) `
+        -Path (Join-Path $script:ExportFolder "AuditSuite_AuthMethodAdoption_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 }
 
 # ===========================================================================
@@ -3356,13 +3974,17 @@ Write-Host "  [25] Risky Users"                      -ForegroundColor White
 Write-Host "  [26] Risk Detections"                  -ForegroundColor White
 Write-Host "  [27] Microsoft Secure Score"           -ForegroundColor White
 Write-Host "  [28] M365 Usage Reports"               -ForegroundColor White
-Write-Host "  [A]  Run all reports           (inactive devices/users: 30 days  |  sign-in/audit log: 7 days  |  risk detections: 30 days  |  usage: 30 days)" -ForegroundColor White
+Write-Host "  [29] Password Never Expires"           -ForegroundColor White
+Write-Host "  [30] Guest Users with Privileged Roles"-ForegroundColor White
+Write-Host "  [31] Legacy Authentication Sign-ins"   -ForegroundColor White
+Write-Host "  [32] Authentication Method Adoption"   -ForegroundColor White
+Write-Host "  [A]  Run all reports           (inactive/risk: 30 days  |  sign-in/audit: 7 days  |  legacy auth: 30 days  |  usage: 30 days)" -ForegroundColor White
 Write-Host ""
 
 $choice = $null
-$validChoices = @("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","A","a")
+$validChoices = @("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","A","a")
 while ($choice -notin $validChoices) {
-    $choice = Read-Host "Enter choice (1-28 / A)"
+    $choice = Read-Host "Enter choice (1-32 / A)"
 }
 $choice = $choice.ToUpper()
 
@@ -3408,7 +4030,11 @@ try {
     if ($runAll -or $choice -eq "25") { Invoke-RiskyUsersReport                                                       }
     if ($runAll -or $choice -eq "26") { Invoke-RiskDetectionsReport -Days     $(if ($runAll) { 30    } else { 0    }) }
     if ($runAll -or $choice -eq "27") { Invoke-SecureScoreReport                                                      }
-    if ($runAll -or $choice -eq "28") { Invoke-M365UsageReports    -Period    $(if ($runAll) { "D30" } else { ""   }) }
+    if ($runAll -or $choice -eq "28") { Invoke-M365UsageReports          -Period $(if ($runAll) { "D30" } else { ""   }) }
+    if ($runAll -or $choice -eq "29") { Invoke-PasswordNeverExpiresReport                                              }
+    if ($runAll -or $choice -eq "30") { Invoke-GuestPrivilegedRolesReport                                              }
+    if ($runAll -or $choice -eq "31") { Invoke-LegacyAuthSignInsReport    -Days   $(if ($runAll) { 30    } else { 0   }) }
+    if ($runAll -or $choice -eq "32") { Invoke-AuthMethodAdoptionReport                                                }
     if ($runAll)                      { Invoke-ExecutiveReport -TenantName $tenantChoice.Name }
 } catch {
     Write-Host ""
