@@ -89,7 +89,13 @@
       [28] M365 Usage Reports
            Active users, email activity, Teams usage, OneDrive and SharePoint usage by selected period.
 
-      [A]  Run all reports
+      [A]  Run all reports + interactive HTML executive report
+           Runs all 28 reports with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days,
+           usage: D30), then generates an interactive single-page HTML executive report alongside the CSVs.
+           The report features CVSS-range severity score gauges, clickable severity cards that filter the
+           findings list, a category breakdown bar chart, findings grouped by category in collapsible sections,
+           expandable per-finding detail and recommendation panels, a search box, severity and category
+           dropdowns, and a print button.
 
     Connects once, runs the chosen report(s), then disconnects.
     All CSV exports land in a per-tenant subfolder. The script tries locations in order:
@@ -2879,85 +2885,349 @@ function Invoke-ExecutiveReport {
         return
     }
 
-    $reportDate = (Get-Date).ToString("yyyy-MM-dd HH:mm")
-
-    $critical = ($script:Findings | Where-Object Severity -eq "Critical").Count
-    $high     = ($script:Findings | Where-Object Severity -eq "High").Count
-    $medium   = ($script:Findings | Where-Object Severity -eq "Medium").Count
-    $low      = ($script:Findings | Where-Object Severity -eq "Low").Count
-    $info     = ($script:Findings | Where-Object Severity -eq "Info").Count
-
-    $overallRisk  = if ($critical -gt 0) { "CRITICAL" } elseif ($high -gt 0) { "HIGH" } elseif ($medium -gt 0) { "MEDIUM" } elseif ($low -gt 0) { "LOW" } else { "GOOD" }
-    $bannerColor  = switch ($overallRisk) { "CRITICAL" { "#b71c1c" } "HIGH" { "#e65100" } "MEDIUM" { "#f9a825" } "LOW" { "#558b2f" } default { "#1b5e20" } }
-
-    $severityOrder = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3; "Info" = 4 }
-    $sorted = $script:Findings | Sort-Object { $severityOrder[$_.Severity] }, Category, Title
-
-    function hesc { param([string]$s); $s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' }
-
-    $rows = foreach ($f in $sorted) {
-        $bg = switch ($f.Severity) {
-            "Critical" { "#b71c1c" } "High" { "#e65100" } "Medium" { "#f9a825" }
-            "Low"      { "#558b2f" } "Info" { "#1565c0" } default  { "#757575" }
-        }
-        "<tr><td><span class='badge' style='background:$bg'>$(hesc $f.Severity)</span></td><td>$(hesc $f.Category)</td><td><strong>$(hesc $f.Title)</strong></td><td>$(hesc $f.Detail)</td><td>$(hesc $f.Recommendation)</td></tr>"
+    function hesc {
+        param([string]$s)
+        $s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;' -replace "'","&#39;"
     }
 
+    # ── Counts and risk level ─────────────────────────────────────────────────
+    $reportDate  = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+    $critical    = ($script:Findings | Where-Object Severity -eq "Critical").Count
+    $high        = ($script:Findings | Where-Object Severity -eq "High").Count
+    $medium      = ($script:Findings | Where-Object Severity -eq "Medium").Count
+    $low         = ($script:Findings | Where-Object Severity -eq "Low").Count
+    $info        = ($script:Findings | Where-Object Severity -eq "Info").Count
+    $total       = $script:Findings.Count
+    $overallRisk = if ($critical -gt 0) { "CRITICAL" } elseif ($high -gt 0) { "HIGH" } elseif ($medium -gt 0) { "MEDIUM" } elseif ($low -gt 0) { "LOW" } else { "GOOD" }
+    $riskHex     = switch ($overallRisk) { "CRITICAL" { "#c62828" } "HIGH" { "#e65100" } "MEDIUM" { "#f57f17" } "LOW" { "#2e7d32" } default { "#1b5e20" } }
+
+    $sevOrder  = @{ "Critical" = 0; "High" = 1; "Medium" = 2; "Low" = 3; "Info" = 4 }
+    $sevColor  = @{ "Critical" = "#c62828"; "High" = "#e65100"; "Medium" = "#f57f17"; "Low" = "#2e7d32"; "Info" = "#1565c0" }
+    $cvssScore = @{ "Critical" = "9.8"; "High" = "7.5"; "Medium" = "5.0"; "Low" = "2.5"; "Info" = "N/A" }
+    $cvssRange = @{ "Critical" = "9.0 – 10.0"; "High" = "7.0 – 8.9"; "Medium" = "4.0 – 6.9"; "Low" = "0.1 – 3.9"; "Info" = "Informational" }
+    $cvssArc   = @{ "Critical" = "98"; "High" = "75"; "Medium" = "50"; "Low" = "25"; "Info" = "5" }
+
+    # ── Severity cards with CVSS gauge ───────────────────────────────────────
+    $cardRows = ""
+    foreach ($sev in @("Critical","High","Medium","Low","Info")) {
+        $cnt   = switch ($sev) { "Critical" { $critical } "High" { $high } "Medium" { $medium } "Low" { $low } "Info" { $info } }
+        $col   = $sevColor[$sev]
+        $arc   = $cvssArc[$sev]
+        $score = $cvssScore[$sev]
+        $range = $cvssRange[$sev]
+        $dim   = if ($cnt -eq 0) { " dim" } else { "" }
+        $svg   = "<svg viewBox='0 0 36 36' width='54' height='54'>" +
+                 "<circle cx='18' cy='18' r='15.9' fill='none' stroke='#ececec' stroke-width='3'/>" +
+                 "<circle cx='18' cy='18' r='15.9' fill='none' stroke='$col' stroke-width='3' stroke-dasharray='$arc,100' stroke-linecap='round' transform='rotate(-90 18 18)'/>" +
+                 "<text x='18' y='14.5' text-anchor='middle' font-size='7.5' fill='$col' font-weight='700' font-family='Segoe UI'>$score</text>" +
+                 "<text x='18' y='22' text-anchor='middle' font-size='4.5' fill='#aaa' font-family='Segoe UI'>CVSS</text>" +
+                 "</svg>"
+        $cardRows += "<div class='sev-card$dim' data-sev='$sev' onclick='filterBySev(this)' title='CVSS range: $range'>" +
+                     "<div class='sc-left'><div class='sc-count' style='color:$col'>$cnt</div><div class='sc-label' style='color:$col'>$sev</div><div class='sc-range'>$range</div></div>" +
+                     "<div class='sc-right'>$svg</div>" +
+                     "</div>"
+    }
+
+    # ── Category breakdown bars ───────────────────────────────────────────────
+    $categories  = $script:Findings | Group-Object Category | Sort-Object Count -Descending
+    $pallete     = @('#1565c0','#6a1b9a','#00695c','#e65100','#c62828','#37474f','#4527a0','#2e7d32','#00838f','#ad1457','#4e342e','#0277bd')
+    $catBarsHtml = ""
+    $catOptHtml  = "<option value=''>All Categories</option>"
+    $ci = 0
+    foreach ($cat in $categories) {
+        $pct   = if ($total -gt 0) { [math]::Round(($cat.Count / $total) * 100, 0) } else { 0 }
+        $color = $pallete[$ci % $pallete.Count]
+        $name  = hesc $cat.Name
+        $catBarsHtml += "<div class='cb-row'>" +
+                        "<div class='cb-name' title='$name'>$name</div>" +
+                        "<div class='cb-track'><div class='cb-fill' style='width:$($pct)%;background:$color'></div></div>" +
+                        "<div class='cb-val'>$($cat.Count)</div>" +
+                        "</div>"
+        $catOptHtml  += "<option value='$name'>$name ($($cat.Count))</option>"
+        $ci++
+    }
+
+    # ── Findings grouped by category ──────────────────────────────────────────
+    $groupedFindings = $script:Findings | Group-Object Category | Sort-Object {
+        ($_.Group | ForEach-Object { $sevOrder[$_.Severity] } | Measure-Object -Minimum).Minimum
+    }
+
+    $findingsHtml = ""
+    foreach ($grp in $groupedFindings) {
+        $grpSorted  = $grp.Group | Sort-Object { $sevOrder[$_.Severity] }, Title
+        $grpTopSev  = ($grp.Group | ForEach-Object { $_.Severity } |
+                       Group-Object | Sort-Object { $sevOrder[$_.Name] } | Select-Object -First 1).Name
+        $grpCol     = $sevColor[$grpTopSev]
+        $grpName    = hesc $grp.Name
+        $grpCount   = $grp.Count
+
+        $findingsHtml += "<div class='cat-section' data-cat='$grpName'>" +
+                         "<div class='cat-hdr' onclick='toggleSection(this)'>" +
+                         "<span class='toggle-icon'>&#9660;</span>" +
+                         "<span class='cat-hdr-name'>$grpName</span>" +
+                         "<span class='cat-hdr-pill' style='background:$grpCol'>$grpTopSev</span>" +
+                         "<span class='cat-hdr-count'>$grpCount finding$(if ($grpCount -ne 1) {'s'})</span>" +
+                         "</div><div class='cat-body'>"
+
+        foreach ($f in $grpSorted) {
+            $col   = $sevColor[$f.Severity]
+            $score = $cvssScore[$f.Severity]
+            $sev   = hesc $f.Severity
+            $cat   = hesc $f.Category
+            $title = hesc $f.Title
+            $det   = hesc $f.Detail
+            $rec   = hesc $f.Recommendation
+
+            $findingsHtml += "<div class='finding' data-severity='$sev' data-category='$cat'>" +
+                             "<div class='finding-hdr' onclick='toggleFinding(this)'>" +
+                             "<div class='f-meta'><span class='f-badge' style='background:$col'>$sev</span><span class='f-score' style='color:$col'>$score</span></div>" +
+                             "<div class='f-title'>$title</div>" +
+                             "<span class='f-chevron'>&#x203A;</span>" +
+                             "</div>" +
+                             "<div class='finding-body'>" +
+                             "<div class='fb-block'><div class='fb-lbl'>Detail</div><div class='fb-txt'>$det</div></div>" +
+                             "<div class='fb-block rec'><div class='fb-lbl'>Recommendation</div><div class='fb-txt'>$rec</div></div>" +
+                             "</div></div>"
+        }
+        $findingsHtml += "</div></div>"
+    }
+
+    # ── Static CSS ────────────────────────────────────────────────────────────
+    $css = @'
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14px;line-height:1.5}
+.hdr{background:linear-gradient(135deg,#0d47a1 0%,#1976d2 100%);color:#fff;padding:22px 40px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.hdr-left h1{font-size:21px;font-weight:300;letter-spacing:.4px}
+.hdr-left .sub{font-size:12px;opacity:.75;margin-top:4px}
+.risk-pill{padding:6px 20px;border-radius:20px;font-size:13px;font-weight:700;letter-spacing:.8px;background:rgba(0,0,0,.25);border:2px solid rgba(255,255,255,.45);white-space:nowrap}
+.statsbar{background:#1a1a2e;color:#fff;padding:9px 40px;font-size:12px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.sb-item{display:flex;align-items:center;gap:6px}
+.sb-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.body{padding:28px 40px 48px;max-width:1400px;margin:0 auto}
+.sec-title{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:#888;font-weight:600;margin-bottom:12px;margin-top:28px}
+.sev-cards{display:flex;gap:12px;flex-wrap:wrap}
+.sev-card{background:#fff;border-radius:8px;padding:14px 18px;flex:1;min-width:155px;box-shadow:0 2px 8px rgba(0,0,0,.08);cursor:pointer;transition:transform .16s,box-shadow .16s,border-color .16s;display:flex;align-items:center;justify-content:space-between;border:2px solid transparent;user-select:none}
+.sev-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.13)}
+.sev-card.active{border-color:currentColor;box-shadow:0 4px 16px rgba(0,0,0,.15)}
+.sev-card.dim{opacity:.38}
+.sev-card.dim:hover{opacity:.7}
+.sc-count{font-size:38px;font-weight:700;line-height:1}
+.sc-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+.sc-range{font-size:10px;color:#aaa;margin-top:3px}
+.cb-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.cb-name{width:190px;font-size:13px;color:#444;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
+.cb-track{flex:1;height:8px;background:#e4e4e4;border-radius:4px;overflow:hidden}
+.cb-fill{height:100%;border-radius:4px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+.cb-val{width:26px;text-align:right;font-size:12px;color:#777;font-weight:600;flex-shrink:0}
+.controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+.ctrl-input{padding:7px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;outline:none;transition:border .15s,box-shadow .15s;min-width:200px}
+.ctrl-input:focus{border-color:#1976d2;box-shadow:0 0 0 3px rgba(25,118,210,.12)}
+.ctrl-select{padding:7px 12px;border:1px solid #ddd;border-radius:6px;font-size:13px;background:#fff;cursor:pointer;outline:none;color:#333}
+.ctrl-select:focus{border-color:#1976d2}
+.ctrl-btn{padding:7px 14px;border:1px solid #ddd;border-radius:6px;font-size:12px;background:#fff;cursor:pointer;color:#555;transition:all .15s;white-space:nowrap}
+.ctrl-btn:hover{background:#f0f4ff;border-color:#1976d2;color:#1976d2}
+.filter-count{margin-left:auto;font-size:12px;color:#999;white-space:nowrap}
+.findings-wrap{margin-top:12px}
+.cat-section{margin-bottom:6px;background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.07);overflow:hidden}
+.cat-hdr{display:flex;align-items:center;gap:10px;padding:13px 18px;cursor:pointer;user-select:none;transition:background .15s}
+.cat-hdr:hover{background:#f8faff}
+.toggle-icon{font-size:11px;color:#aaa;transition:transform .2s;width:12px;flex-shrink:0}
+.cat-section.collapsed .toggle-icon{transform:rotate(-90deg)}
+.cat-hdr-name{font-weight:600;font-size:14px;flex:1;color:#1a1a2e}
+.cat-hdr-pill{padding:2px 10px;border-radius:10px;color:#fff;font-size:10px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;flex-shrink:0}
+.cat-hdr-count{font-size:12px;color:#aaa;white-space:nowrap}
+.finding{border-top:1px solid #f3f3f3}
+.finding-hdr{display:flex;align-items:center;gap:12px;padding:11px 18px 11px 26px;cursor:pointer;transition:background .12s}
+.finding-hdr:hover{background:#fafafa}
+.finding.open .finding-hdr{background:#f8faff}
+.f-meta{display:flex;align-items:center;gap:8px;flex-shrink:0;min-width:100px}
+.f-badge{padding:2px 9px;border-radius:10px;color:#fff;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}
+.f-score{font-size:12px;font-weight:700;min-width:28px}
+.f-title{flex:1;font-size:13px;color:#222;line-height:1.45}
+.f-chevron{font-size:20px;color:#ccc;transition:transform .15s,color .15s;flex-shrink:0}
+.finding.open .f-chevron{transform:rotate(90deg);color:#1976d2}
+.finding-body{display:none;padding:14px 26px 18px 52px;border-top:1px solid #eff0f5;background:#f8faff}
+.finding.open .finding-body{display:flex;gap:24px;flex-wrap:wrap}
+.fb-block{flex:1;min-width:240px}
+.fb-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:#aaa;font-weight:700;margin-bottom:5px}
+.fb-txt{font-size:13px;color:#333;line-height:1.55}
+.fb-block.rec .fb-lbl{color:#1565c0}
+.fb-block.rec .fb-txt{color:#1565c0}
+.no-results{padding:48px;text-align:center;color:#bbb;font-size:14px;display:none}
+.footer{margin-top:36px;padding:20px 0;text-align:center;font-size:11px;color:#bbb;border-top:1px solid #e8e8e8;line-height:1.8}
+@media print{
+  .controls,.ctrl-btn{display:none!important}
+  .finding-body{display:flex!important}
+  .cat-section.collapsed .cat-body{display:block!important}
+  body{background:#fff}
+  .cat-section{box-shadow:none;border:1px solid #eee}
+  .hdr{background:#0d47a1!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+'@
+
+    # ── Static JS ─────────────────────────────────────────────────────────────
+    $js = @'
+var activeSev = '';
+
+function filterBySev(card) {
+    var sev = card.getAttribute('data-sev');
+    if (activeSev === sev) {
+        activeSev = '';
+        document.querySelectorAll('.sev-card').forEach(function(c) { c.classList.remove('active'); });
+        document.getElementById('sevFilter').value = '';
+    } else {
+        activeSev = sev;
+        document.querySelectorAll('.sev-card').forEach(function(c) {
+            c.classList.toggle('active', c.getAttribute('data-sev') === sev);
+        });
+        document.getElementById('sevFilter').value = sev;
+    }
+    applyFilters();
+}
+
+function toggleSection(hdr) {
+    var sec = hdr.parentElement;
+    var body = hdr.nextElementSibling;
+    sec.classList.toggle('collapsed');
+    body.style.display = sec.classList.contains('collapsed') ? 'none' : '';
+}
+
+function toggleFinding(hdr) {
+    hdr.parentElement.classList.toggle('open');
+}
+
+function applyFilters() {
+    var search  = document.getElementById('search').value.toLowerCase();
+    var sevF    = document.getElementById('sevFilter').value;
+    var catF    = document.getElementById('catFilter').value;
+    var visible = 0;
+
+    document.querySelectorAll('.finding').forEach(function(row) {
+        var sev  = row.getAttribute('data-severity');
+        var cat  = row.getAttribute('data-category');
+        var text = row.querySelector('.f-title').textContent.toLowerCase();
+        var show = true;
+        if (sevF && sev !== sevF) show = false;
+        if (catF && cat !== catF) show = false;
+        if (search && text.indexOf(search) === -1) show = false;
+        row.style.display = show ? '' : 'none';
+        if (show) visible++;
+    });
+
+    document.querySelectorAll('.cat-section').forEach(function(sec) {
+        var any = false;
+        sec.querySelectorAll('.finding').forEach(function(r) { if (r.style.display !== 'none') any = true; });
+        sec.style.display = any ? '' : 'none';
+    });
+
+    var fc = document.getElementById('filterCount');
+    if (fc) fc.textContent = visible + ' finding' + (visible !== 1 ? 's' : '');
+    var nr = document.getElementById('noResults');
+    if (nr) nr.style.display = visible === 0 ? 'block' : 'none';
+}
+
+function syncSevCard() {
+    var val = document.getElementById('sevFilter').value;
+    activeSev = val;
+    document.querySelectorAll('.sev-card').forEach(function(c) {
+        c.classList.toggle('active', val !== '' && c.getAttribute('data-sev') === val);
+    });
+    applyFilters();
+}
+
+function clearFilters() {
+    activeSev = '';
+    document.getElementById('search').value = '';
+    document.getElementById('sevFilter').value = '';
+    document.getElementById('catFilter').value = '';
+    document.querySelectorAll('.sev-card').forEach(function(c) { c.classList.remove('active'); });
+    applyFilters();
+}
+
+function expandAll() {
+    document.querySelectorAll('.cat-section').forEach(function(s) {
+        s.classList.remove('collapsed');
+        s.querySelector('.cat-body').style.display = '';
+    });
+}
+
+function collapseAll() {
+    document.querySelectorAll('.cat-section').forEach(function(s) {
+        s.classList.add('collapsed');
+        s.querySelector('.cat-body').style.display = 'none';
+    });
+}
+
+window.addEventListener('DOMContentLoaded', function() { applyFilters(); });
+'@
+
+    # ── Assemble HTML ─────────────────────────────────────────────────────────
     $html = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>M365 Security Executive Report - $TenantName</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',Arial,sans-serif;background:#f4f6f8;color:#1a1a2e;font-size:14px}
-.hdr{background:#0d47a1;color:#fff;padding:28px 40px 20px}
-.hdr h1{font-size:22px;font-weight:300;letter-spacing:.5px}
-.hdr .sub{margin-top:6px;opacity:.75;font-size:12px}
-.banner{background:$bannerColor;color:#fff;padding:10px 40px;font-size:13px;font-weight:700;letter-spacing:1px}
-.body{padding:28px 40px}
-.cards{display:flex;gap:14px;margin-bottom:28px;flex-wrap:wrap}
-.card{background:#fff;border-radius:6px;padding:18px 20px;flex:1;min-width:100px;box-shadow:0 1px 4px rgba(0,0,0,.1);text-align:center;border-top:4px solid #ccc}
-.card.c{border-color:#b71c1c}.card.h{border-color:#e65100}.card.m{border-color:#f9a825}.card.l{border-color:#558b2f}.card.i{border-color:#1565c0}
-.card .n{font-size:34px;font-weight:700;line-height:1}
-.card.c .n{color:#b71c1c}.card.h .n{color:#e65100}.card.m .n{color:#f9a825}.card.l .n{color:#558b2f}.card.i .n{color:#1565c0}
-.card .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:#666;margin-top:4px}
-h2{font-size:15px;font-weight:600;color:#0d47a1;margin-bottom:14px}
-table{width:100%;border-collapse:collapse;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)}
-thead tr{background:#e3f2fd}
-th{padding:11px 14px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#0d47a1;font-weight:600}
-td{padding:11px 14px;border-top:1px solid #f0f0f0;vertical-align:top;line-height:1.45}
-tr:hover td{background:#fafafa}
-td:nth-child(4){color:#333;font-size:13px}
-td:nth-child(5){color:#0d47a1;font-size:13px}
-.badge{display:inline-block;padding:2px 9px;border-radius:10px;color:#fff;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
-.footer{margin-top:28px;font-size:11px;color:#999;text-align:center;padding-bottom:28px}
-</style>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M365 Security Report — $(hesc $TenantName)</title>
+<style>$css</style>
 </head>
 <body>
+
 <div class="hdr">
-  <h1>M365 Security Executive Report</h1>
-  <div class="sub">Tenant: <strong>$TenantName</strong> &nbsp;&bull;&nbsp; Generated: $reportDate &nbsp;&bull;&nbsp; M365AuditSuite</div>
-</div>
-<div class="banner">Overall Risk Level: $overallRisk &nbsp;&bull;&nbsp; $($script:Findings.Count) finding$(if ($script:Findings.Count -ne 1) {'s'}) identified</div>
-<div class="body">
-  <div class="cards">
-    <div class="card c"><div class="n">$critical</div><div class="lbl">Critical</div></div>
-    <div class="card h"><div class="n">$high</div><div class="lbl">High</div></div>
-    <div class="card m"><div class="n">$medium</div><div class="lbl">Medium</div></div>
-    <div class="card l"><div class="n">$low</div><div class="lbl">Low</div></div>
-    <div class="card i"><div class="n">$info</div><div class="lbl">Info</div></div>
+  <div class="hdr-left">
+    <h1>M365 Security Executive Report</h1>
+    <div class="sub">Tenant: <strong>$(hesc $TenantName)</strong> &nbsp;&bull;&nbsp; Generated: $reportDate &nbsp;&bull;&nbsp; M365AuditSuite</div>
   </div>
-  <h2>Findings</h2>
-  <table>
-    <thead><tr><th style="width:85px">Severity</th><th style="width:155px">Category</th><th style="width:210px">Finding</th><th>Detail</th><th style="width:210px">Recommendation</th></tr></thead>
-    <tbody>
-      $($rows -join "`n      ")
-    </tbody>
-  </table>
-  <div class="footer">Generated by M365AuditSuite &nbsp;&bull;&nbsp; Author: Melih Sivrikaya &nbsp;&bull;&nbsp; $reportDate &nbsp;&bull;&nbsp; For internal use only</div>
+  <div class="risk-pill" style="border-color:$riskHex">$overallRisk &nbsp;&mdash;&nbsp; $total finding$(if ($total -ne 1) {'s'})</div>
 </div>
+
+<div class="statsbar">
+  <div class="sb-item"><div class="sb-dot" style="background:#c62828"></div>Critical: $critical</div>
+  <div class="sb-item"><div class="sb-dot" style="background:#e65100"></div>High: $high</div>
+  <div class="sb-item"><div class="sb-dot" style="background:#f57f17"></div>Medium: $medium</div>
+  <div class="sb-item"><div class="sb-dot" style="background:#2e7d32"></div>Low: $low</div>
+  <div class="sb-item"><div class="sb-dot" style="background:#1565c0"></div>Info: $info</div>
+</div>
+
+<div class="body">
+
+  <div class="sec-title">Severity Overview &mdash; Click a card to filter</div>
+  <div class="sev-cards">$cardRows</div>
+
+  <div class="sec-title">Category Breakdown</div>
+  <div class="cat-breakdown">$catBarsHtml</div>
+
+  <div class="sec-title">Findings</div>
+  <div class="controls">
+    <input class="ctrl-input" id="search" type="search" placeholder="Search findings&#8230;" oninput="applyFilters()">
+    <select class="ctrl-select" id="sevFilter" onchange="syncSevCard()">
+      <option value="">All Severities</option>
+      <option value="Critical">Critical</option>
+      <option value="High">High</option>
+      <option value="Medium">Medium</option>
+      <option value="Low">Low</option>
+      <option value="Info">Info</option>
+    </select>
+    <select class="ctrl-select" id="catFilter" onchange="applyFilters()">$catOptHtml</select>
+    <button class="ctrl-btn" onclick="expandAll()">Expand All</button>
+    <button class="ctrl-btn" onclick="collapseAll()">Collapse All</button>
+    <button class="ctrl-btn" onclick="clearFilters()">Clear Filters</button>
+    <button class="ctrl-btn" onclick="window.print()">&#128438; Print</button>
+    <span class="filter-count" id="filterCount"></span>
+  </div>
+
+  <div class="findings-wrap">
+    $findingsHtml
+    <div class="no-results" id="noResults">No findings match the current filters.</div>
+  </div>
+
+  <div class="footer">
+    Generated by M365AuditSuite &nbsp;&bull;&nbsp; Author: Melih Sivrikaya &nbsp;&bull;&nbsp; $reportDate<br>
+    CVSS scores are indicative severity mappings aligned with CVSS v3.1 ranges, not CVE-specific scores &nbsp;&bull;&nbsp; For internal use only
+  </div>
+
+</div>
+<script>$js</script>
 </body>
 </html>
 "@

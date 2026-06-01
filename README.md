@@ -76,7 +76,14 @@ Lists all current auth methods before confirmation. Displays results in a format
 ### AuditSuite.ps1
 A single interactive script that covers 28 audit reports for any configured tenant. On launch it presents a tenant selection menu followed by a report menu. All CSV exports land in a per-tenant subfolder, timestamped. The script resolves the export location automatically: Desktop (OneDrive) → Desktop (default) → `C:\Audit\<TenantName>\`.
 
-**Running option `[A]` (all reports) also generates an HTML executive report** — a single-page, C-level summary with severity-classified findings (Critical / High / Medium / Low / Info), an overall risk level banner, and per-finding recommendations. The report is saved alongside the CSVs as `AuditSuite_ExecutiveReport_<timestamp>.html`.
+**Running option `[A]` (all reports) also generates an interactive HTML executive report** saved alongside the CSVs as `AuditSuite_ExecutiveReport_<timestamp>.html`. The report includes:
+
+- **Overall risk level** (CRITICAL → GOOD) in the header
+- **Severity cards** — Critical / High / Medium / Low / Info counts, each with a CVSS v3.1 range score gauge; click any card to instantly filter the findings list
+- **Category breakdown** — horizontal bar chart showing finding distribution across all audit categories
+- **Interactive findings list** — grouped by category in collapsible sections; each finding expands to reveal full detail and a concrete recommendation
+- **Filter controls** — free-text search, severity dropdown, category dropdown, and Expand All / Collapse All / Clear / Print buttons
+- CVSS scores are indicative severity mappings aligned with CVSS v3.1 ranges, not CVE-specific values
 
 Uses the **ExportReadAudit** app registration. The `$Tenants` array at the top of the script holds all tenant entries — add `TenantId` and `AppId` to onboard a new tenant.
 
