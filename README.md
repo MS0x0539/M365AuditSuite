@@ -70,7 +70,9 @@ Lists all current auth methods before confirmation. Displays results in a format
 ## Audit
 
 ### AuditSuite.ps1
-A single interactive script that covers 28 audit reports for any configured tenant. On launch it presents a tenant selection menu followed by a report menu. All exports land in a per-tenant subfolder on the Desktop (`Desktop/<TenantName>/`), timestamped.
+A single interactive script that covers 28 audit reports for any configured tenant. On launch it presents a tenant selection menu followed by a report menu. All CSV exports land in a per-tenant subfolder, timestamped. The script resolves the export location automatically: Desktop (OneDrive) → Desktop (default) → `C:\Audit\<TenantName>\`.
+
+**Running option `[A]` (all reports) also generates an HTML executive report** — a single-page, C-level summary with severity-classified findings (Critical / High / Medium / Low / Info), an overall risk level banner, and per-finding recommendations. The report is saved alongside the CSVs as `AuditSuite_ExecutiveReport_<timestamp>.html`.
 
 Uses the **ExportReadAudit** app registration. The `$Tenants` array at the top of the script holds all tenant entries — add `TenantId` and `AppId` to onboard a new tenant.
 
@@ -104,7 +106,7 @@ Uses the **ExportReadAudit** app registration. The `$Tenants` array at the top o
 | 26 | Risk Detections | Individual risk events by lookback period — leaked credentials, atypical travel, etc. (requires Entra ID P2) |
 | 27 | Microsoft Secure Score | Current score vs max, industry comparison, top improvement actions |
 | 28 | M365 Usage Reports | Active users, email activity, Teams usage, OneDrive and SharePoint usage |
-| A | Run all reports | Runs all 28 with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days, usage: 30 days) |
+| A | Run all reports + executive report | Runs all 28 with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days, usage: 30 days) and generates an HTML executive report |
 
 **Permissions:** `Policy.Read.All`, `User.Read.All`, `Group.Read.All`, `Directory.Read.All`, `RoleManagement.Read.Directory`, `Application.Read.All`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementConfiguration.Read.All`, `AuditLog.Read.All`, `Domain.Read.All`, `RoleManagementAlert.Read.Directory`, `PrivilegedAccess.Read.AzureAD`, `PrivilegedAccess.Read.AzureADGroup`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `SecurityEvents.Read.All`, `Reports.Read.All`
 
