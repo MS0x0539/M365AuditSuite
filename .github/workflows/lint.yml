@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           $results = Get-ChildItem -Recurse -Filter *.ps1 |
-            Invoke-ScriptAnalyzer -Severity Error, Warning
+            Invoke-ScriptAnalyzer -Severity Error, Warning -Settings PSScriptAnalyzerSettings.psd1
 
           if ($results) {
             $results | Format-Table -AutoSize

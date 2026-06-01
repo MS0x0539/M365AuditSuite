@@ -409,7 +409,7 @@ $GroupConfigs = @(
 # ── Error / result tracking ─────────────────────────────────────────────────
 $script:Log = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-function Write-Log {
+function Write-PIMLog {
     param (
         [ValidateSet("INFO","OK","WARN","ERR")] [string] $Level,
         [string] $Phase,
@@ -513,14 +513,14 @@ foreach ($config in $GroupConfigs) {
     $existing  = Resolve-Group -DisplayName $groupName
 
     if ($existing) {
-        Write-Log -Level OK -Phase "P1" -Message "Group exists: $groupName (Id: $($existing.Id))"
+        Write-PIMLog -Level OK -Phase "P1" -Message "Group exists: $groupName (Id: $($existing.Id))"
         $config['_GroupId'] = $existing.Id
     } else {
         if ($DryRun) {
-            Write-Log -Level INFO -Phase "P1" -Message "[DRY RUN] Would create group: $groupName"
+            Write-PIMLog -Level INFO -Phase "P1" -Message "[DRY RUN] Would create group: $groupName"
             $config['_GroupId'] = "[DRY-RUN-ID]"
         } else {
-            Write-Log -Level INFO -Phase "P1" -Message "Creating group: $groupName"
+            Write-PIMLog -Level INFO -Phase "P1" -Message "Creating group: $groupName"
             try {
                 $newGroup = New-MgGroup `
                     -DisplayName      $groupName `
@@ -532,12 +532,12 @@ foreach ($config in $GroupConfigs) {
                     -ErrorAction Stop
 
                 $config['_GroupId'] = $newGroup.Id
-                Write-Log -Level OK -Phase "P1" -Message "Created: $groupName (Id: $($newGroup.Id))"
-                Write-Log -Level INFO -Phase "P1" -Message "Waiting 22s for directory propagation after group creation..."
+                Write-PIMLog -Level OK -Phase "P1" -Message "Created: $groupName (Id: $($newGroup.Id))"
+                Write-PIMLog -Level INFO -Phase "P1" -Message "Waiting 22s for directory propagation after group creation..."
                 Start-Sleep -Seconds 22
             } catch {
                 $config['_GroupId'] = $null
-                Write-Log -Level ERR -Phase "P1" -Message "Failed to create '$groupName': $($_.Exception.Message)"
+                Write-PIMLog -Level ERR -Phase "P1" -Message "Failed to create '$groupName': $($_.Exception.Message)"
             }
         }
     }
@@ -554,30 +554,30 @@ foreach ($config in $GroupConfigs) {
     $groupId   = $config['_GroupId']
 
     if (-not $groupId) {
-        Write-Log -Level WARN -Phase "P2" -Message "Skipping '$groupName' — group has no Id (creation failed in Phase 1)"
+        Write-PIMLog -Level WARN -Phase "P2" -Message "Skipping '$groupName' — group has no Id (creation failed in Phase 1)"
         continue
     }
 
     if (-not $config.Users -or $config.Users.Count -eq 0) {
-        Write-Log -Level INFO -Phase "P2" -Message "No users configured for '$groupName', skipping."
+        Write-PIMLog -Level INFO -Phase "P2" -Message "No users configured for '$groupName', skipping."
         continue
     }
 
-    Write-Log -Level INFO -Phase "P2" -Message "Processing members for: $groupName"
+    Write-PIMLog -Level INFO -Phase "P2" -Message "Processing members for: $groupName"
 
     foreach ($displayName in $config.Users) {
         $userObj = Resolve-User -DisplayName $displayName
 
         if (-not $userObj) {
             $missingLevel = if ($DryRun) { "WARN" } else { "ERR" }
-            Write-Log -Level $missingLevel -Phase "P2" -Message "User not found: '$displayName' (group: $groupName)"
+            Write-PIMLog -Level $missingLevel -Phase "P2" -Message "User not found: '$displayName' (group: $groupName)"
             continue
         }
 
         if ($config.PIM4Group) {
             # PIM4Groups: add as eligible member via EasyPIM
             if ($DryRun) {
-                Write-Log -Level INFO -Phase "P2" -Message "[DRY RUN] Would assign eligible member: $displayName → $groupName"
+                Write-PIMLog -Level INFO -Phase "P2" -Message "[DRY RUN] Would assign eligible member: $displayName → $groupName"
             } else {
                 try {
                     New-PIMGroupEligibleAssignment `
@@ -587,32 +587,32 @@ foreach ($config in $GroupConfigs) {
                         -Type          "member" `
                         -Justification $Justification `
                         -Permanent | Out-Null
-                    Write-Log -Level OK -Phase "P2" -Message "Eligible member assigned: $displayName → $groupName"
+                    Write-PIMLog -Level OK -Phase "P2" -Message "Eligible member assigned: $displayName → $groupName"
                 } catch {
                     # EasyPIM throws if already assigned — treat as OK
                     if ($_.Exception.Message -match "already") {
-                        Write-Log -Level OK -Phase "P2" -Message "Already eligible: $displayName → $groupName"
+                        Write-PIMLog -Level OK -Phase "P2" -Message "Already eligible: $displayName → $groupName"
                     } else {
-                        Write-Log -Level ERR -Phase "P2" -Message "Failed eligible assignment '$displayName' → '$groupName': $($_.Exception.Message)"
+                        Write-PIMLog -Level ERR -Phase "P2" -Message "Failed eligible assignment '$displayName' → '$groupName': $($_.Exception.Message)"
                     }
                 }
             }
         } else {
             # Regular group: add as direct member
             if ($DryRun) {
-                Write-Log -Level INFO -Phase "P2" -Message "[DRY RUN] Would add member: $displayName → $groupName"
+                Write-PIMLog -Level INFO -Phase "P2" -Message "[DRY RUN] Would add member: $displayName → $groupName"
             } else {
                 $isMember = Get-MgGroupMember -GroupId $groupId -All -ErrorAction SilentlyContinue |
                     Where-Object { $_.Id -eq $userObj.Id }
 
                 if ($isMember) {
-                    Write-Log -Level OK -Phase "P2" -Message "Already member: $displayName → $groupName"
+                    Write-PIMLog -Level OK -Phase "P2" -Message "Already member: $displayName → $groupName"
                 } else {
                     try {
                         New-MgGroupMember -GroupId $groupId -DirectoryObjectId $userObj.Id -ErrorAction Stop
-                        Write-Log -Level OK -Phase "P2" -Message "Added member: $displayName → $groupName"
+                        Write-PIMLog -Level OK -Phase "P2" -Message "Added member: $displayName → $groupName"
                     } catch {
-                        Write-Log -Level ERR -Phase "P2" -Message "Failed to add '$displayName' → '$groupName': $($_.Exception.Message)"
+                        Write-PIMLog -Level ERR -Phase "P2" -Message "Failed to add '$displayName' → '$groupName': $($_.Exception.Message)"
                     }
                 }
             }
@@ -631,13 +631,13 @@ foreach ($config in $GroupConfigs) {
     $groupId   = $config['_GroupId']
 
     if (-not $groupId) {
-        Write-Log -Level WARN -Phase "P3" -Message "Skipping '$groupName' — no group Id"
+        Write-PIMLog -Level WARN -Phase "P3" -Message "Skipping '$groupName' — no group Id"
         continue
     }
 
     foreach ($role in $config.ActiveRoles) {
         if ($DryRun) {
-            Write-Log -Level INFO -Phase "P3" -Message "[DRY RUN] Would assign [Active  ] $role → $groupName"
+            Write-PIMLog -Level INFO -Phase "P3" -Message "[DRY RUN] Would assign [Active  ] $role → $groupName"
         } else {
             try {
                 New-PIMEntraRoleActiveAssignment `
@@ -646,12 +646,12 @@ foreach ($config in $GroupConfigs) {
                     -PrincipalID   $groupId `
                     -Justification $Justification `
                     -Permanent | Out-Null
-                Write-Log -Level OK -Phase "P3" -Message "[Active  ] $role → $groupName"
+                Write-PIMLog -Level OK -Phase "P3" -Message "[Active  ] $role → $groupName"
             } catch {
                 if ($_.Exception.Message -match "already") {
-                    Write-Log -Level OK -Phase "P3" -Message "[Active  ] Already assigned: $role → $groupName"
+                    Write-PIMLog -Level OK -Phase "P3" -Message "[Active  ] Already assigned: $role → $groupName"
                 } else {
-                    Write-Log -Level ERR -Phase "P3" -Message "[Active  ] Failed '$role' → '$groupName': $($_.Exception.Message)"
+                    Write-PIMLog -Level ERR -Phase "P3" -Message "[Active  ] Failed '$role' → '$groupName': $($_.Exception.Message)"
                 }
             }
         }
@@ -659,7 +659,7 @@ foreach ($config in $GroupConfigs) {
 
     foreach ($role in $config.EligibleRoles) {
         if ($DryRun) {
-            Write-Log -Level INFO -Phase "P3" -Message "[DRY RUN] Would assign [Eligible] $role → $groupName"
+            Write-PIMLog -Level INFO -Phase "P3" -Message "[DRY RUN] Would assign [Eligible] $role → $groupName"
         } else {
             try {
                 New-PIMEntraRoleEligibleAssignment `
@@ -668,12 +668,12 @@ foreach ($config in $GroupConfigs) {
                     -PrincipalID   $groupId `
                     -Justification $Justification `
                     -Permanent | Out-Null
-                Write-Log -Level OK -Phase "P3" -Message "[Eligible] $role → $groupName"
+                Write-PIMLog -Level OK -Phase "P3" -Message "[Eligible] $role → $groupName"
             } catch {
                 if ($_.Exception.Message -match "already") {
-                    Write-Log -Level OK -Phase "P3" -Message "[Eligible] Already assigned: $role → $groupName"
+                    Write-PIMLog -Level OK -Phase "P3" -Message "[Eligible] Already assigned: $role → $groupName"
                 } else {
-                    Write-Log -Level ERR -Phase "P3" -Message "[Eligible] Failed '$role' → '$groupName': $($_.Exception.Message)"
+                    Write-PIMLog -Level ERR -Phase "P3" -Message "[Eligible] Failed '$role' → '$groupName': $($_.Exception.Message)"
                 }
             }
         }
@@ -691,15 +691,15 @@ foreach ($config in $GroupConfigs | Where-Object { $_.PIM4Group -eq $true }) {
     $groupId   = $config['_GroupId']
 
     if (-not $groupId) {
-        Write-Log -Level WARN -Phase "P4" -Message "Skipping '$groupName' — no group Id"
+        Write-PIMLog -Level WARN -Phase "P4" -Message "Skipping '$groupName' — no group Id"
         continue
     }
 
     if ($DryRun) {
-        Write-Log -Level INFO -Phase "P4" -Message "[DRY RUN] Would apply PIM group policy (8h, MFA+justification+ticket): $groupName"
+        Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would apply PIM group policy (8h, MFA+justification+ticket): $groupName"
     } else {
-        Write-Log -Level INFO -Phase "P4" -Message "Applying PIM group policy: $groupName"
-        Write-Log -Level INFO -Phase "P4" -Message "Waiting 10s before applying PIM policy..."
+        Write-PIMLog -Level INFO -Phase "P4" -Message "Applying PIM group policy: $groupName"
+        Write-PIMLog -Level INFO -Phase "P4" -Message "Waiting 10s before applying PIM policy..."
         Start-Sleep -Seconds 10
 
         try {
@@ -715,9 +715,9 @@ foreach ($config in $GroupConfigs | Where-Object { $_.PIM4Group -eq $true }) {
                 -Notification_EligibleAssignment_Alert $NotificationConfig `
                 -Notification_ActiveAssignment_Alert   $NotificationConfig `
                 -Notification_Activation_Alert         $NotificationConfig
-            Write-Log -Level OK -Phase "P4" -Message "PIM policy applied: $groupName"
+            Write-PIMLog -Level OK -Phase "P4" -Message "PIM policy applied: $groupName"
         } catch {
-            Write-Log -Level ERR -Phase "P4" -Message "Failed to apply PIM policy on '$groupName': $($_.Exception.Message)"
+            Write-PIMLog -Level ERR -Phase "P4" -Message "Failed to apply PIM policy on '$groupName': $($_.Exception.Message)"
         }
     }
 }
@@ -727,11 +727,11 @@ foreach ($config in $GroupConfigs | Where-Object { $_.PIM4Group -eq $true }) {
 # ===========================================================================
 Write-Host ""
 Write-Host "── PHASE 5: Standard Role Policies ──────────────────" -ForegroundColor Cyan
-Write-Log -Level INFO -Phase "P5" -Message "Applying standard policy to $($StandardRoles.Count) roles..."
+Write-PIMLog -Level INFO -Phase "P5" -Message "Applying standard policy to $($StandardRoles.Count) roles..."
 
 foreach ($role in $StandardRoles) {
     if ($DryRun) {
-        Write-Log -Level INFO -Phase "P5" -Message "[DRY RUN] Would apply standard policy: $role"
+        Write-PIMLog -Level INFO -Phase "P5" -Message "[DRY RUN] Would apply standard policy: $role"
     } else {
         try {
             Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
@@ -742,9 +742,9 @@ foreach ($role in $StandardRoles) {
                 -Notification_EligibleAssignment_Alert $NotificationConfig `
                 -Notification_ActiveAssignment_Alert   $NotificationConfig `
                 -Notification_Activation_Alert         $NotificationConfig
-            Write-Log -Level OK -Phase "P5" -Message "$role"
+            Write-PIMLog -Level OK -Phase "P5" -Message "$role"
         } catch {
-            Write-Log -Level ERR -Phase "P5" -Message "Failed '$role': $($_.Exception.Message)"
+            Write-PIMLog -Level ERR -Phase "P5" -Message "Failed '$role': $($_.Exception.Message)"
         }
     }
 }
@@ -761,11 +761,11 @@ $approverGroup_Security = Resolve-Group -DisplayName $ApproverGroupName_Security
 
 if (-not $approverGroup_M365) {
     $lvl = if ($DryRun) { "WARN" } else { "ERR" }
-    Write-Log -Level $lvl -Phase "P6" -Message "Approver group not found: '$ApproverGroupName_M365'$(if (-not $DryRun) { ' — privileged role policies CANNOT be applied.' })"
+    Write-PIMLog -Level $lvl -Phase "P6" -Message "Approver group not found: '$ApproverGroupName_M365'$(if (-not $DryRun) { ' — privileged role policies CANNOT be applied.' })"
 }
 if (-not $approverGroup_Security) {
     $lvl = if ($DryRun) { "WARN" } else { "ERR" }
-    Write-Log -Level $lvl -Phase "P6" -Message "Approver group not found: '$ApproverGroupName_Security'$(if (-not $DryRun) { ' — privileged role policies CANNOT be applied.' })"
+    Write-PIMLog -Level $lvl -Phase "P6" -Message "Approver group not found: '$ApproverGroupName_Security'$(if (-not $DryRun) { ' — privileged role policies CANNOT be applied.' })"
 }
 
 if ($approverGroup_M365 -and $approverGroup_Security) {
@@ -774,12 +774,12 @@ if ($approverGroup_M365 -and $approverGroup_Security) {
         @{ Id = $approverGroup_Security.Id; Name = $ApproverGroupName_Security; Type = "group" }
     )
 
-    Write-Log -Level INFO -Phase "P6" -Message "Approvers resolved: $ApproverGroupName_M365, $ApproverGroupName_Security"
-    Write-Log -Level INFO -Phase "P6" -Message "Applying privileged policy to $($PrivilegedRoles.Count) roles..."
+    Write-PIMLog -Level INFO -Phase "P6" -Message "Approvers resolved: $ApproverGroupName_M365, $ApproverGroupName_Security"
+    Write-PIMLog -Level INFO -Phase "P6" -Message "Applying privileged policy to $($PrivilegedRoles.Count) roles..."
 
     foreach ($role in $PrivilegedRoles) {
         if ($DryRun) {
-            Write-Log -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required): $role"
+            Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required): $role"
         } else {
             try {
                 Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
@@ -793,19 +793,19 @@ if ($approverGroup_M365 -and $approverGroup_Security) {
                     -Notification_EligibleAssignment_Alert $NotificationConfig `
                     -Notification_ActiveAssignment_Alert   $NotificationConfig `
                     -Notification_Activation_Alert         $NotificationConfig
-                Write-Log -Level OK -Phase "P6" -Message "$role"
+                Write-PIMLog -Level OK -Phase "P6" -Message "$role"
             } catch {
-                Write-Log -Level ERR -Phase "P6" -Message "Failed '$role': $($_.Exception.Message)"
+                Write-PIMLog -Level ERR -Phase "P6" -Message "Failed '$role': $($_.Exception.Message)"
             }
         }
     }
 } elseif ($DryRun) {
-    Write-Log -Level INFO -Phase "P6" -Message "[DRY RUN] Approver groups would be created in Phase 1 — enumerating privileged role policies:"
+    Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Approver groups would be created in Phase 1 — enumerating privileged role policies:"
     foreach ($role in $PrivilegedRoles) {
-        Write-Log -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required, approvers: $ApproverGroupName_M365 + $ApproverGroupName_Security): $role"
+        Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required, approvers: $ApproverGroupName_M365 + $ApproverGroupName_Security): $role"
     }
 } else {
-    Write-Log -Level WARN -Phase "P6" -Message "Phase 6 skipped — one or both approver groups could not be resolved."
+    Write-PIMLog -Level WARN -Phase "P6" -Message "Phase 6 skipped — one or both approver groups could not be resolved."
 }
 
 # =====================
