@@ -74,13 +74,13 @@ Lists all current auth methods before confirmation. Displays results in a format
 ## Audit
 
 ### AuditSuite.ps1
-A single interactive script that covers 28 audit reports for any configured tenant. On launch it presents a tenant selection menu followed by a report menu. All CSV exports land in a per-tenant subfolder, timestamped. The script resolves the export location automatically: Desktop (OneDrive) → Desktop (default) → `C:\Audit\<TenantName>\`.
+A single interactive script that covers 32 audit reports for any configured tenant. On launch it presents a tenant selection menu followed by a report menu. All CSV exports land in a per-tenant subfolder, timestamped. The script resolves the export location automatically: Desktop (OneDrive) → Desktop (default) → `C:\Audit\<TenantName>\`.
 
-**Running option `[A]` (all reports) also generates an interactive HTML executive report** saved alongside the CSVs as `AuditSuite_ExecutiveReport_<timestamp>.html`. The report includes:
+**Running option `[A]` or `[R]` generates an interactive HTML executive report** saved as `AuditSuite_ExecutiveReport_<timestamp>.html`. The report includes:
 
 - **Overall risk level** (CRITICAL → GOOD) in the header
 - **Severity cards** — Critical / High / Medium / Low / Info counts, each with a CVSS v3.1 range score gauge; click any card to instantly filter the findings list
-- **Category breakdown** — horizontal bar chart showing finding distribution across all audit categories
+- **Risk by Category** — stacked horizontal bar chart showing severity composition per category; bar width is severity-weighted (Critical=10 pts, High=6, Medium=3, Low=1, Info=0) so single informational findings don't inflate the chart; hover any segment for a per-severity tooltip
 - **Interactive findings list** — grouped by category in collapsible sections; each finding expands to reveal full detail and a concrete recommendation
 - **Filter controls** — free-text search, severity dropdown, category dropdown, and Expand All / Collapse All / Clear / Print buttons
 - CVSS scores are indicative severity mappings aligned with CVSS v3.1 ranges, not CVE-specific values
@@ -117,7 +117,12 @@ Uses the **ExportReadAudit** app registration. The `$Tenants` array at the top o
 | 26 | Risk Detections | Individual risk events by lookback period — leaked credentials, atypical travel, etc. (requires Entra ID P2) |
 | 27 | Microsoft Secure Score | Current score vs max, industry comparison, top improvement actions |
 | 28 | M365 Usage Reports | Active users, email activity, Teams usage, OneDrive and SharePoint usage |
-| A | Run all reports + executive report | Runs all 28 with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days, usage: 30 days) and generates an HTML executive report |
+| 29 | Password Never Expires | All enabled accounts with DisablePasswordExpiration set, sorted by days since last password change |
+| 30 | Guest Users with Privileged Roles | Cross-references all guest/external accounts against active and PIM-eligible role assignments |
+| 31 | Legacy Authentication Sign-ins | Recent sign-ins using legacy protocols (EAS, IMAP4, POP3, SMTP, MAPI, EWS) that bypass CA and MFA |
+| 32 | Authentication Method Adoption | Tenant-wide count of users registered per authentication method |
+| A | Run all reports + executive report | Runs all 32 with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days, legacy auth: 30 days, usage: D30) and generates an HTML executive report alongside all CSVs |
+| R | Report-only (no CSVs) | Same as A but skips all CSV exports — only the HTML executive report is written to disk. M365 Usage Reports (28) are also skipped as they are download-only with no findings |
 
 **Permissions:** `Policy.Read.All`, `User.Read.All`, `Group.Read.All`, `Directory.Read.All`, `RoleManagement.Read.Directory`, `Application.Read.All`, `Device.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementConfiguration.Read.All`, `AuditLog.Read.All`, `Domain.Read.All`, `RoleManagementAlert.Read.Directory`, `PrivilegedAccess.Read.AzureAD`, `PrivilegedAccess.Read.AzureADGroup`, `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All`, `SecurityEvents.Read.All`, `Reports.Read.All`
 

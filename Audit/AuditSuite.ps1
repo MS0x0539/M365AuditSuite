@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Entra / M365 audit suite — thirty-two reports in one interactive script, plus an HTML executive report when running all.
+    Entra / M365 audit suite — thirty-two reports in one interactive script, plus an HTML executive report when running all (A) or report-only (R).
 
 .DESCRIPTION
     Presents a menu to run any of the following audit reports:
@@ -108,15 +108,22 @@
 
       [A]  Run all reports + interactive HTML executive report
            Runs all 32 reports with sensible defaults (inactive/risk: 30 days, sign-in/audit: 7 days,
-           legacy auth: 30 days, usage: D30), then generates an interactive single-page HTML executive
-           report alongside the CSVs.
+           legacy auth: 30 days, usage: D30), exports all CSVs, then generates an interactive single-page
+           HTML executive report alongside the CSVs.
            The report features CVSS-range severity score gauges, clickable severity cards that filter the
-           findings list, a category breakdown bar chart, findings grouped by category in collapsible sections,
-           expandable per-finding detail and recommendation panels, a search box, severity and category
-           dropdowns, and a print button.
+           findings list, a severity-weighted stacked bar chart (Risk by Category) with per-severity colour
+           segments and hover tooltips, findings grouped by category in collapsible sections, expandable
+           per-finding detail and recommendation panels, a search box, severity and category dropdowns,
+           and a print button.
+
+      [R]  Report-only (all reports, no CSVs)
+           Identical to [A] — runs all 32 reports with the same defaults and generates the HTML executive
+           report — but skips every CSV export. No files are written except the single HTML report.
+           M365 Usage Reports (28) are also skipped because they produce no findings and are download-only.
+           Use this when you only need the executive summary and do not want raw data files on disk.
 
     Connects once, runs the chosen report(s), then disconnects.
-    All CSV exports land in a per-tenant subfolder. The script tries locations in order:
+    All exports land in a per-tenant subfolder. The script tries locations in order:
     Desktop (OneDrive), Desktop (default), C:\Audit\. First writable location wins.
 
 .NOTES
@@ -213,6 +220,7 @@ function Resolve-ExportFolder {
     return $null
 }
 $script:ExportFolder = $null   # resolved after tenant selection
+$script:SkipCsv      = $false  # set to $true by the R option (report-only)
 
 # ── Executive report findings collector ───────────────────────────────────────
 $script:Findings = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -428,6 +436,7 @@ function Format-SessionControls {
 
 function Write-CsvBom {
     param([object[]]$Data, [string]$Path)
+    if ($script:SkipCsv) { return }
     if (-not $Data -or $Data.Count -eq 0) {
         Write-Host "  No data to export — CSV skipped." -ForegroundColor DarkGray
         return
@@ -3072,23 +3081,42 @@ function Invoke-ExecutiveReport {
                      "</div>"
     }
 
-    # ── Category breakdown bars ───────────────────────────────────────────────
-    $categories  = $script:Findings | Group-Object Category | Sort-Object Count -Descending
-    $pallete     = @('#1565c0','#6a1b9a','#00695c','#e65100','#c62828','#37474f','#4527a0','#2e7d32','#00838f','#ad1457','#4e342e','#0277bd')
+    # ── Category breakdown — stacked severity bars ───────────────────────────
+    # Each bar is split into coloured segments per severity level present.
+    # Bar width = category risk score / max, so Info-only categories stay small.
+    # Score weights: Critical=10, High=6, Medium=3, Low=1, Info=0.
+    $sevWeight   = @{ "Critical" = 10; "High" = 6; "Medium" = 3; "Low" = 1; "Info" = 0 }
+    $sevKeys     = @("Critical","High","Medium","Low","Info")
+    $categories  = $script:Findings | Group-Object Category | ForEach-Object {
+        $grp    = $_.Group
+        $score  = ($grp | ForEach-Object { $sevWeight[$_.Severity] } | Measure-Object -Sum).Sum
+        $counts = @{}
+        foreach ($k in $sevKeys) { $counts[$k] = ($grp | Where-Object Severity -eq $k).Count }
+        [PSCustomObject]@{ Name = $_.Name; Count = $_.Count; Score = $score; Counts = $counts }
+    } | Sort-Object Score -Descending
+    $maxCatScore = [math]::Max(1, ($categories | Measure-Object Score -Maximum).Maximum)
     $catBarsHtml = ""
     $catOptHtml  = "<option value=''>All Categories</option>"
-    $ci = 0
     foreach ($cat in $categories) {
-        $pct   = if ($total -gt 0) { [math]::Round(($cat.Count / $total) * 100, 0) } else { 0 }
-        $color = $pallete[$ci % $pallete.Count]
-        $name  = hesc $cat.Name
-        $catBarsHtml += "<div class='cb-row'>" +
+        $barPct  = [math]::Max(1, [math]::Round(($cat.Score / $maxCatScore) * 100, 0))
+        $name    = hesc $cat.Name
+        # Store counts as plain pipe/comma data — no HTML inside the attribute to avoid quote-breaking
+        $countsCsv = ($sevKeys | ForEach-Object { $cat.Counts[$_] }) -join ','
+        $cbData  = "$name|$($cat.Count)|$($cat.Score)|$countsCsv"
+        $segs    = ""
+        foreach ($k in $sevKeys) {
+            $cnt = $cat.Counts[$k]
+            if ($cnt -eq 0) { continue }
+            $segPct = [math]::Round(($cnt / $cat.Count) * $barPct, 2)
+            $col    = $sevColor[$k]
+            $segs  += "<div class='cb-seg' style='width:$($segPct)%;background:$col'></div>"
+        }
+        $catBarsHtml += "<div class='cb-row' data-cb='$cbData' onmouseenter='cbTip(event,this)' onmouseleave='cbTipHide()'>" +
                         "<div class='cb-name' title='$name'>$name</div>" +
-                        "<div class='cb-track'><div class='cb-fill' style='width:$($pct)%;background:$color'></div></div>" +
+                        "<div class='cb-track'>$segs</div>" +
                         "<div class='cb-val'>$($cat.Count)</div>" +
                         "</div>"
         $catOptHtml  += "<option value='$name'>$name ($($cat.Count))</option>"
-        $ci++
     }
 
     # ── Findings grouped by category ──────────────────────────────────────────
@@ -3158,11 +3186,22 @@ body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#0e0f14;color:
 .sc-count{font-size:38px;font-weight:700;line-height:1}
 .sc-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .sc-range{font-size:10px;color:#484d66;margin-top:3px}
-.cb-row{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.cb-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;cursor:default}
 .cb-name{width:190px;font-size:13px;color:#9096b0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
-.cb-track{flex:1;height:7px;background:#1e2130;border-radius:4px;overflow:hidden}
-.cb-fill{height:100%;border-radius:4px;transition:width .6s cubic-bezier(.4,0,.2,1);opacity:.85}
+.cb-track{flex:1;height:16px;background:#1e2130;border-radius:4px;overflow:hidden;display:flex}
+.cb-seg{height:100%;transition:opacity .15s}
+.cb-seg:first-child{border-radius:4px 0 0 4px}
+.cb-seg:last-child{border-radius:0 4px 4px 0}
+.cb-seg:only-child{border-radius:4px}
+.cb-row:hover .cb-seg{opacity:.75}
 .cb-val{width:26px;text-align:right;font-size:12px;color:#5a5f78;font-weight:600;flex-shrink:0}
+.cb-legend{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+.cb-leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:#6b7a99}
+.cb-leg-dot{width:9px;height:9px;border-radius:2px;flex-shrink:0}
+.cb-tooltip{position:fixed;background:#1a1e2e;border:1px solid #2a3050;padding:9px 13px;border-radius:7px;font-size:11px;color:#c9d1e0;pointer-events:none;opacity:0;transition:opacity .1s;line-height:1.8;z-index:9999;white-space:nowrap}
+.cb-tooltip.show{opacity:1}
+.tt-sev{display:flex;align-items:center;gap:5px}
+.tt-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
 .controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
 .ctrl-input{padding:7px 12px;border:1px solid #252838;border-radius:6px;font-size:13px;outline:none;background:#161921;color:#d4d5e0;transition:border .15s,box-shadow .15s;min-width:200px}
 .ctrl-input:focus{border-color:#3d6aab;box-shadow:0 0 0 3px rgba(61,106,171,.18)}
@@ -3213,6 +3252,8 @@ body.light .sev-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.13)}
 body.light .sc-range{color:#aaa}
 body.light .cb-name{color:#444}
 body.light .cb-track{background:#e4e4e4}
+body.light .cb-tooltip{background:#fff;border-color:#ccc;color:#222}
+body.light .cb-leg-item{color:#555}
 body.light .ctrl-input{background:#fff;border-color:#ddd;color:#333}
 body.light .ctrl-input::placeholder{color:#bbb}
 body.light .ctrl-select{background:#fff;border-color:#ddd;color:#333}
@@ -3344,6 +3385,31 @@ function collapseAll() {
     });
 }
 
+function cbTip(e, row) {
+    var tt = document.getElementById('cbTooltip');
+    if (!tt) return;
+    var parts  = row.getAttribute('data-cb').split('|');
+    var name   = parts[0], total = parts[1], score = parts[2];
+    var counts = parts[3].split(',');
+    var keys   = ['Critical','High','Medium','Low','Info'];
+    var cols   = {'Critical':'#c62828','High':'#e65100','Medium':'#f57f17','Low':'#2e7d32','Info':'#1565c0'};
+    var lines  = '';
+    keys.forEach(function(k, i) {
+        if (parseInt(counts[i]) > 0) {
+            lines += '<span class="tt-sev"><span class="tt-dot" style="background:' + cols[k] + '"></span>' + k + ': ' + counts[i] + '</span>';
+        }
+    });
+    tt.innerHTML = '<strong>' + name + '</strong><br>' + lines +
+                   '<br><span style="color:#6b7a99">Risk score: ' + score + ' &nbsp;&bull;&nbsp; ' + total + ' finding' + (total !== '1' ? 's' : '') + '</span>';
+    tt.style.left = (e.clientX + 16) + 'px';
+    tt.style.top  = (e.clientY - 12) + 'px';
+    tt.classList.add('show');
+}
+function cbTipHide() {
+    var tt = document.getElementById('cbTooltip');
+    if (tt) tt.classList.remove('show');
+}
+
 function toggleTheme() {
     var light = document.body.classList.toggle('light');
     var btn = document.getElementById('themeBtn');
@@ -3399,8 +3465,16 @@ window.addEventListener('DOMContentLoaded', function() {
   <div class="sec-title">Severity Overview &mdash; Click a card to filter</div>
   <div class="sev-cards">$cardRows</div>
 
-  <div class="sec-title">Category Breakdown</div>
+  <div class="sec-title">Risk by Category</div>
+  <div class="cb-legend">
+    <div class="cb-leg-item"><div class="cb-leg-dot" style="background:#c62828"></div>Critical</div>
+    <div class="cb-leg-item"><div class="cb-leg-dot" style="background:#e65100"></div>High</div>
+    <div class="cb-leg-item"><div class="cb-leg-dot" style="background:#f57f17"></div>Medium</div>
+    <div class="cb-leg-item"><div class="cb-leg-dot" style="background:#2e7d32"></div>Low</div>
+    <div class="cb-leg-item"><div class="cb-leg-dot" style="background:#1565c0"></div>Info</div>
+  </div>
   <div class="cat-breakdown">$catBarsHtml</div>
+  <div class="cb-tooltip" id="cbTooltip"></div>
 
   <div class="sec-title">Findings</div>
   <div class="controls">
@@ -3979,12 +4053,13 @@ Write-Host "  [30] Guest Users with Privileged Roles"-ForegroundColor White
 Write-Host "  [31] Legacy Authentication Sign-ins"   -ForegroundColor White
 Write-Host "  [32] Authentication Method Adoption"   -ForegroundColor White
 Write-Host "  [A]  Run all reports           (inactive/risk: 30 days  |  sign-in/audit: 7 days  |  legacy auth: 30 days  |  usage: 30 days)" -ForegroundColor White
+Write-Host "  [R]  Run all reports — report only (same as A but skips CSV exports; only the executive HTML report is written)" -ForegroundColor White
 Write-Host ""
 
 $choice = $null
-$validChoices = @("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","A","a")
+$validChoices = @("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32","A","a","R","r")
 while ($choice -notin $validChoices) {
-    $choice = Read-Host "Enter choice (1-32 / A)"
+    $choice = Read-Host "Enter choice (1-32 / A / R)"
 }
 $choice = $choice.ToUpper()
 
@@ -4000,7 +4075,8 @@ try {
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
-$runAll = $choice -eq "A"
+$runAll          = $choice -in @("A","R")
+$script:SkipCsv  = $choice -eq "R"
 
 try {
     if ($runAll -or $choice -eq "1") { Invoke-CAAccessReport       }
@@ -4030,12 +4106,12 @@ try {
     if ($runAll -or $choice -eq "25") { Invoke-RiskyUsersReport                                                       }
     if ($runAll -or $choice -eq "26") { Invoke-RiskDetectionsReport -Days     $(if ($runAll) { 30    } else { 0    }) }
     if ($runAll -or $choice -eq "27") { Invoke-SecureScoreReport                                                      }
-    if ($runAll -or $choice -eq "28") { Invoke-M365UsageReports          -Period $(if ($runAll) { "D30" } else { ""   }) }
+    if (($runAll -and -not $script:SkipCsv) -or $choice -eq "28") { Invoke-M365UsageReports -Period $(if ($runAll) { "D30" } else { "" }) }
     if ($runAll -or $choice -eq "29") { Invoke-PasswordNeverExpiresReport                                              }
     if ($runAll -or $choice -eq "30") { Invoke-GuestPrivilegedRolesReport                                              }
     if ($runAll -or $choice -eq "31") { Invoke-LegacyAuthSignInsReport    -Days   $(if ($runAll) { 30    } else { 0   }) }
     if ($runAll -or $choice -eq "32") { Invoke-AuthMethodAdoptionReport                                                }
-    if ($runAll)                      { Invoke-ExecutiveReport -TenantName $tenantChoice.Name }
+    if ($runAll)                       { Invoke-ExecutiveReport -TenantName $tenantChoice.Name }
 } catch {
     Write-Host ""
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
