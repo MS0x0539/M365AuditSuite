@@ -254,10 +254,10 @@ $GroupConfigs = @(
         Description   = "Role-assignable group for M365 high-privileged administrators (5 sensitive roles, approval required)."
         PIM4Group     = $false
         Users         = @(
-            "Beheer Admin One"
-            "Beheer Admin Two"
-            "Beheer Admin Three"
-            "Beheer Admin Four"
+            "Beheer Mark de Vries"
+            "Beheer Sara Jansen"
+            "Beheer Luuk Bakker"
+            "Beheer Emma Peters"
         )
         EligibleRoles = @(
             "Global Administrator"
@@ -273,17 +273,17 @@ $GroupConfigs = @(
         Description   = "Role-assignable group for M365 administrators."
         PIM4Group     = $false
         Users         = @(
-            "Beheer M365 Admin One"
-            "Beheer M365 Admin Two"
-            "Beheer M365 Admin Three"
-            "Beheer M365 Admin Four"
-            "Beheer M365 Admin Five"
-            "Beheer M365 Admin Six"
-            "Beheer M365 Admin Seven"
-            "Beheer M365 Admin Eight"
-            "Beheer M365 Admin Nine"
-            "Beheer M365 Admin Ten"
-            "Beheer M365 Admin Eleven"
+            "Beheer Tom Smit"
+            "Beheer Lotte Mulder"
+            "Beheer Daan Visser"
+            "Beheer Nora de Jong"
+            "Beheer Lars Meijer"
+            "Beheer Fleur van Dijk"
+            "Beheer Jesse Boer"
+            "Beheer Anna Groot"
+            "Beheer Bram Hendriks"
+            "Beheer Lisa Vermeer"
+            "Beheer Noah Jacobs"
         )
         EligibleRoles = @(
             "User Administrator"
@@ -314,9 +314,9 @@ $GroupConfigs = @(
         Description   = "Role-assignable group for Operational Security Officers."
         PIM4Group     = $false
         Users         = @(
-            "Beheer Security Admin One"
-            "Beheer Security Admin Two"
-            "Beheer Security Admin Three"
+            "Beheer Sander Blom"
+            "Beheer Eva van Leeuwen"
+            "Beheer Rick de Boer"
         )
         EligibleRoles = @(
             "User Administrator"
@@ -334,8 +334,8 @@ $GroupConfigs = @(
         Description   = "Role-assignable group for Technical Information Security Officers."
         PIM4Group     = $false
         Users         = @(
-            "Beheer TISO Admin One"
-            "Beheer TISO Admin Two"
+            "Beheer Tim Vos"
+            "Beheer Iris Willems"
         )
         EligibleRoles = @()
         ActiveRoles   = @(
@@ -348,9 +348,9 @@ $GroupConfigs = @(
         Description   = "Approver group for PIM activation of privileged roles (Security team)."
         PIM4Group     = $false
         Users         = @(
-            "Beheer Security Admin One"
-            "Beheer Security Admin Two"
-            "Beheer Security Admin Three"
+            "Beheer Sander Blom"
+            "Beheer Eva van Leeuwen"
+            "Beheer Rick de Boer"
         )
         EligibleRoles = @()
         ActiveRoles   = @()
@@ -360,17 +360,17 @@ $GroupConfigs = @(
         Description   = "Approver group for PIM activation of privileged roles (M365)."
         PIM4Group     = $false
         Users         = @(
-            "Beheer M365 Admin One"
-            "Beheer M365 Admin Two"
-            "Beheer M365 Admin Three"
-            "Beheer M365 Admin Four"
-            "Beheer M365 Admin Five"
-            "Beheer M365 Admin Six"
-            "Beheer M365 Admin Seven"
-            "Beheer M365 Admin Eight"
-            "Beheer M365 Admin Nine"
-            "Beheer M365 Admin Ten"
-            "Beheer M365 Admin Eleven"
+            "Beheer Tom Smit"
+            "Beheer Lotte Mulder"
+            "Beheer Daan Visser"
+            "Beheer Nora de Jong"
+            "Beheer Lars Meijer"
+            "Beheer Fleur van Dijk"
+            "Beheer Jesse Boer"
+            "Beheer Anna Groot"
+            "Beheer Bram Hendriks"
+            "Beheer Lisa Vermeer"
+            "Beheer Noah Jacobs"
         )
         EligibleRoles = @()
         ActiveRoles   = @()
@@ -380,17 +380,17 @@ $GroupConfigs = @(
         Description   = "PIM4Groups — Exchange, Global Secure Access & Intune Administrator active."
         PIM4Group     = $true
         Users         = @(
-            "Beheer M365 Admin One"
-            "Beheer M365 Admin Two"
-            "Beheer M365 Admin Three"
-            "Beheer M365 Admin Four"
-            "Beheer M365 Admin Five"
-            "Beheer M365 Admin Six"
-            "Beheer M365 Admin Seven"
-            "Beheer M365 Admin Eight"
-            "Beheer M365 Admin Nine"
-            "Beheer M365 Admin Ten"
-            "Beheer M365 Admin Eleven"
+            "Beheer Tom Smit"
+            "Beheer Lotte Mulder"
+            "Beheer Daan Visser"
+            "Beheer Nora de Jong"
+            "Beheer Lars Meijer"
+            "Beheer Fleur van Dijk"
+            "Beheer Jesse Boer"
+            "Beheer Anna Groot"
+            "Beheer Bram Hendriks"
+            "Beheer Lisa Vermeer"
+            "Beheer Noah Jacobs"
         )
         EligibleRoles = @()
         ActiveRoles   = @(

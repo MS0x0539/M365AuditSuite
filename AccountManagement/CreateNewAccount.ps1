@@ -26,22 +26,22 @@ $CertificateThumbprint = "692D02E8823BDDAC78EFAD7ADB8EE49EC09EE54C"
 # =====================
 # Account configuration
 # =====================
-$FirstName       = "Jane"
-$LastName        = "Doe"
-$Department      = "HR"
-$JobTitle        = "Consultant"
-$EmployeeHireDate = "2026-01-01T00:00:00Z"   # yyyy-mm-ddT00:00:00Z
-$EmployeeID      = "Z000000"                  # e.g. Z00001
-$UPN             = "j.doe@contoso.com"         # userPrincipalName
+$FirstName       = "Beheer"
+$LastName        = "Mark de Vries"
+$Department      = "IT"
+$JobTitle        = "Beheerder"
+$EmployeeHireDate = "2026-06-02T00:00:00Z"   # yyyy-mm-ddT00:00:00Z
+$EmployeeID      = "B000001"                  # e.g. Z00001
+$UPN             = "b.devries@psbv.org"        # userPrincipalName
 
 $City            = "Amsterdam"
 $OfficeLocation  = "Office Building A"
 $Country         = "Netherlands"
-$CompanyName     = "Contoso"
+$CompanyName     = "PSBV"
 $PostalCode      = "1000 AA"
 $State           = "Noord-Holland"
 $StreetAddress   = "Keizersgracht 1"
-$EmployeeType    = "Medewerker"
+$EmployeeType    = "Administrator"
 $UsageLocation   = "NL"
 $BusinessPhones  = [string[]]@("020 000 00 00")
 $PasswordPolicies = "DisablePasswordExpiration"
