@@ -75,9 +75,9 @@ param (
 # =====================
 # Tenant configuration
 # =====================
-$TenantId              = "<YOUR_TENANT_ID>"
-$AppId                 = "<YOUR_APP_ID>"
-$CertificateThumbprint = "<YOUR_CERT_THUMBPRINT>"
+$TenantId              = "58288310-2b28-42b6-883b-dcef687a4e29"
+$AppId                 = "e3febffa-d27e-4193-936f-f3ca01b24af8"
+$CertificateThumbprint = "6805FD0B9EBA398B82CB59CA87E67E2FD3075657"
 
 # =====================
 # Policy configuration
