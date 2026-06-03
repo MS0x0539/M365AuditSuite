@@ -1,46 +1,33 @@
 <#
 .SYNOPSIS
-    Creates or validates the baseline Conditional Access policies required by the organization.
+    Creates or validates the PIM Conditional Access prerequisites — auth context and step-up policy.
 
 .DESCRIPTION
-    Idempotent — safe to re-run. For each policy the script checks whether it exists and
-    whether it is in the expected state. Missing policies are created; existing policies
-    with a wrong state are flagged as WARN. Deep condition drift (grant controls, user
-    scope) is also checked and reported.
-
-    Policies managed (all display names are configurable in the config section):
+    Idempotent — safe to re-run. Covers only the CA components required by OnboardingEntraPIM.
 
     PHASE 1 — Authentication context
         Ensures auth context '$AuthContextId' exists in the tenant and is marked available.
-        This is the context referenced by the PIM Step-Up policy and by OnboardingEntraPIM.
+        This is the context referenced by the PIM Step-Up policy and checked by the
+        OnboardingEntraPIM pre-flight (PRE-CA).
 
-    PHASE 2 — PIM Step-Up Authentication
+    PHASE 2 — PIM Step-Up Authentication policy
         CA policy targeting auth context '$AuthContextId'. Requires MFA on activation.
-        Applies to all users. This is the policy that enforces step-up auth on PIM role
-        activation — OnboardingEntraPIM pre-flight checks for it.
+        Applies to all users. This enforces step-up auth whenever a PIM role activation
+        triggers the authentication context.
 
-    PHASE 3 — Require MFA for All Users
-        CA policy requiring MFA for all cloud apps. Break-glass accounts listed in
-        $BreakGlassObjectIds are excluded. Defaults to report-only state so you can
-        validate coverage before enforcing.
-
-    PHASE 4 — Block Legacy Authentication
-        CA policy blocking all legacy authentication protocols (Exchange ActiveSync and
-        other legacy clients). Defaults to report-only state.
-
-    PHASE 5 — Summary
+    PHASE 3 — Summary
         Prints OK / WARN / ERR counts per phase. Exits with code 1 if any errors.
 
     ── REQUIREMENTS ────────────────────────────────────────────────────────────
     • EasyPIM app registration must have Policy.ReadWrite.ConditionalAccess granted
-      in addition to its existing permissions (add in Entra ID → App registrations →
-      EasyPIM → API permissions → Microsoft Graph → Application → Policy.ReadWrite.ConditionalAccess)
+      in addition to its existing permissions (Entra ID → App registrations →
+      EasyPIM → API permissions → Microsoft Graph → Application →
+      Policy.ReadWrite.ConditionalAccess → Grant admin consent)
     ────────────────────────────────────────────────────────────────────────────
 
 .NOTES
     Author      : Melih Sivrikaya
-    Permissions : Policy.Read.All, Policy.ReadWrite.ConditionalAccess,
-                  User.Read.All, Group.Read.All
+    Permissions : Policy.Read.All, Policy.ReadWrite.ConditionalAccess
                   (application permissions — grant admin consent)
     Auth        : Certificate-based (app registration: EasyPIM)
     Requires    : Microsoft.Graph.Authentication
@@ -62,37 +49,18 @@ $AppId                 = "e3febffa-d27e-4193-936f-f3ca01b24af8"
 $CertificateThumbprint = "6805FD0B9EBA398B82CB59CA87E67E2FD3075657"
 
 # =====================
-# Auth context
+# Policy name and state (customise if needed)
 # =====================
+$PolicyName_PIMStepUp  = "PIM — Enforce Re-Authentication (c1)"
+$PolicyState_PIMStepUp = "enabled"   # "enabled" | "disabled" | "enabledForReportingButNotEnforced"
+
+# =====================
+# Auth context
 # Must match $AuthContextId in OnboardingEntraPIM.ps1
+# =====================
 $AuthContextId          = "c1"
 $AuthContextDisplayName = "PIM Step-Up Authentication"
 $AuthContextDescription = "Required for PIM role activation. Enforced by $PolicyName_PIMStepUp."
-
-# =====================
-# Policy names (customise if needed)
-# =====================
-$PolicyName_PIMStepUp   = "SEC-PIM-01 — PIM Step-Up Authentication (c1)"
-$PolicyName_MFAAll      = "SEC-CA-01 — Require MFA for All Users"
-$PolicyName_BlockLegacy = "SEC-CA-02 — Block Legacy Authentication"
-
-# =====================
-# Policy states
-# "enabled" | "disabled" | "enabledForReportingButNotEnforced"
-# =====================
-$PolicyState_PIMStepUp   = "enabled"                           # PIM step-up must be enforced
-$PolicyState_MFAAll      = "enabledForReportingButNotEnforced" # validate coverage before enforcing
-$PolicyState_BlockLegacy = "enabledForReportingButNotEnforced" # validate coverage before enforcing
-
-# =====================
-# Break-glass account object IDs
-# These accounts are excluded from the MFA for All Users policy.
-# Add the object IDs (GUIDs) of your emergency access accounts.
-# =====================
-$BreakGlassObjectIds = @(
-    # "00000000-0000-0000-0000-000000000001"
-    # "00000000-0000-0000-0000-000000000002"
-)
 
 # ===========================================================================
 # SCRIPT INTERNALS — do not edit below this line
@@ -253,7 +221,12 @@ try {
     }
 } catch {
     $errMsg = $_.Exception.Message
-    if ($errMsg -match "404|NotFound|ResourceNotFound") {
+    if ($errMsg -match "BadRequest|Bad Request") {
+        # Graph returns 400 on the individual auth context GET for some tenants — same quirk
+        # handled in OnboardingEntraPIM PRE-CA. Context is assumed present; Phase 2 will confirm
+        # it is usable when the CA policy is created or validated successfully.
+        Write-CALog -Level OK -Phase "P1" -Message "Auth context '$AuthContextId' — individual lookup returned 400 (known API quirk); assumed present."
+    } elseif ($errMsg -match "404|NotFound|ResourceNotFound") {
         Write-CALog -Level INFO -Phase "P1" -Message "Auth context '$AuthContextId' not found — creating"
         if (-not $DryRun) {
             try {
@@ -284,6 +257,21 @@ try {
 Write-Host ""
 Write-Host "── PHASE 2: PIM Step-Up Policy ───────────────────────" -ForegroundColor Cyan
 
+# ── Pre-check: detect any existing policy already targeting c1 (any name) ────
+# If a policy with a different name already targets c1, warn before creating a duplicate.
+try {
+    $existingC1Policies = (Get-AllCAPolicies) | Where-Object {
+        $refs = @($_.conditions.applications.includeAuthenticationContextClassReferences)
+        $refs -contains $AuthContextId
+    }
+    $unmanaged = $existingC1Policies | Where-Object { $_.displayName -ne $PolicyName_PIMStepUp }
+    foreach ($p in $unmanaged) {
+        Write-CALog -Level WARN -Phase "P2" -Message "Existing policy targeting '$AuthContextId' found with a different name: '$($p.displayName)' (state: $($p.state)) — this may be a duplicate. Review and remove it if this script's policy will replace it."
+    }
+} catch {
+    Write-CALog -Level INFO -Phase "P2" -Message "Could not scan for existing c1 policies: $($_.Exception.Message)"
+}
+
 $pimStepUpBody = @{
     displayName   = $PolicyName_PIMStepUp
     state         = $PolicyState_PIMStepUp
@@ -305,78 +293,33 @@ $pimStepUpBody = @{
 Invoke-CreateOrValidatePolicy -Phase "P2" -PolicyName $PolicyName_PIMStepUp `
     -ExpectedState $PolicyState_PIMStepUp -Body $pimStepUpBody
 
-# ===========================================================================
-# PHASE 3 — Require MFA for All Users
-# ===========================================================================
-Write-Host ""
-Write-Host "── PHASE 3: MFA for All Users ────────────────────────" -ForegroundColor Cyan
+# ── Condition drift check ─────────────────────────────────────────────────────
+# Runs regardless of DryRun — read-only. Validates the three properties that must
+# be correct for PIM step-up MFA to actually fire.
+$p2Policy = Find-PolicyByName -Name $PolicyName_PIMStepUp
+if ($p2Policy) {
+    $ctxRefs      = @($p2Policy.conditions.applications.includeAuthenticationContextClassReferences)
+    $includeUsers = @($p2Policy.conditions.users.includeUsers)
+    $grantCtrls   = @($p2Policy.grantControls.builtInControls)
 
-if ($BreakGlassObjectIds.Count -eq 0) {
-    Write-CALog -Level WARN -Phase "P3" -Message "`$BreakGlassObjectIds is empty — policy will apply to ALL users including break-glass accounts. Add object IDs to exclude them."
-}
-
-$mfaAllBody = @{
-    displayName   = $PolicyName_MFAAll
-    state         = $PolicyState_MFAAll
-    conditions    = @{
-        users        = @{
-            includeUsers = @("All")
-            excludeUsers = $BreakGlassObjectIds
-        }
-        applications = @{
-            includeApplications = @("All")
-        }
+    if ($ctxRefs -notcontains $AuthContextId) {
+        Write-CALog -Level WARN -Phase "P2" -Message "Drift: auth context '$AuthContextId' is not in includeAuthenticationContextClassReferences — PIM step-up MFA will NOT fire."
+    } else {
+        Write-CALog -Level OK -Phase "P2" -Message "Drift OK: auth context '$AuthContextId' is referenced."
     }
-    grantControls = @{
-        operator        = "OR"
-        builtInControls = @("mfa")
+
+    if ($includeUsers -notcontains "All") {
+        Write-CALog -Level WARN -Phase "P2" -Message "Drift: includeUsers is not 'All' — policy does not cover all users (current: $($includeUsers -join ', '))."
+    } else {
+        Write-CALog -Level OK -Phase "P2" -Message "Drift OK: user scope is All."
     }
-}
 
-Invoke-CreateOrValidatePolicy -Phase "P3" -PolicyName $PolicyName_MFAAll `
-    -ExpectedState $PolicyState_MFAAll -Body $mfaAllBody
-
-# ── Verify break-glass exclusions on existing policy ─────────────────────────
-if (-not $DryRun -and $BreakGlassObjectIds.Count -gt 0) {
-    $existingMFAAll = Find-PolicyByName -Name $PolicyName_MFAAll
-    if ($existingMFAAll) {
-        $currentExcludes = @($existingMFAAll.conditions.users.excludeUsers)
-        foreach ($bgId in $BreakGlassObjectIds) {
-            if ($currentExcludes -notcontains $bgId) {
-                Write-CALog -Level WARN -Phase "P3" -Message "Break-glass account '$bgId' is NOT in the excludeUsers list of '$PolicyName_MFAAll' — update the policy manually or re-run to recreate."
-            } else {
-                Write-CALog -Level OK -Phase "P3" -Message "Break-glass '$bgId' is excluded from MFA for All Users."
-            }
-        }
+    if ($grantCtrls -notcontains "mfa") {
+        Write-CALog -Level WARN -Phase "P2" -Message "Drift: grant control 'mfa' is missing (current: $($grantCtrls -join ', ')) — step-up authentication is not enforced."
+    } else {
+        Write-CALog -Level OK -Phase "P2" -Message "Drift OK: grant control is mfa."
     }
 }
-
-# ===========================================================================
-# PHASE 4 — Block Legacy Authentication
-# ===========================================================================
-Write-Host ""
-Write-Host "── PHASE 4: Block Legacy Authentication ──────────────" -ForegroundColor Cyan
-
-$blockLegacyBody = @{
-    displayName   = $PolicyName_BlockLegacy
-    state         = $PolicyState_BlockLegacy
-    conditions    = @{
-        users        = @{
-            includeUsers = @("All")
-        }
-        applications = @{
-            includeApplications = @("All")
-        }
-        clientAppTypes = @("exchangeActiveSync", "other")
-    }
-    grantControls = @{
-        operator        = "OR"
-        builtInControls = @("block")
-    }
-}
-
-Invoke-CreateOrValidatePolicy -Phase "P4" -PolicyName $PolicyName_BlockLegacy `
-    -ExpectedState $PolicyState_BlockLegacy -Body $blockLegacyBody
 
 # =====================
 # Disconnect
@@ -384,7 +327,7 @@ Invoke-CreateOrValidatePolicy -Phase "P4" -PolicyName $PolicyName_BlockLegacy `
 try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
 
 # ===========================================================================
-# PHASE 5 — Summary
+# PHASE 3 — Summary
 # ===========================================================================
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -401,8 +344,6 @@ foreach ($phase in $phases) {
     $label = switch ($phase) {
         "P1" { "Phase 1 — Authentication Context  " }
         "P2" { "Phase 2 — PIM Step-Up Policy       " }
-        "P3" { "Phase 3 — MFA for All Users         " }
-        "P4" { "Phase 4 — Block Legacy Auth          " }
         default { $phase }
     }
     $color = if ($err -gt 0) { "Red" } elseif ($warn -gt 0) { "Yellow" } else { "Green" }
