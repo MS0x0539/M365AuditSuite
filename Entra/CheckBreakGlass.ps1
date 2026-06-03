@@ -286,15 +286,22 @@ foreach ($accountName in $BreakGlassAccounts) {
                     default { $_.'@odata.type'.Split('.')[-1] }
                 }
             }
-            $weakMethods = $methods | Where-Object { $_ -in @("Phone (SMS/Voice)", "Email OTP") }
-            $methodList  = ($methods | Where-Object { $_ -ne "Password" }) -join ", "
+            $weakMethods   = @($methods | Where-Object { $_ -in @("Phone (SMS/Voice)", "Email OTP") })
+            $strongMethods = @($methods | Where-Object { $_ -in @("FIDO2", "Authenticator", "OATH TOTP", "Windows Hello") })
+            $methodList    = ($methods | Where-Object { $_ -ne "Password" }) -join ", "
             $row.AuthMethods = if ($methodList) { $methodList } else { "Password only" }
 
+            if ($strongMethods.Count -gt 0) {
+                Write-Host "    OK   Strong method(s) registered: $($strongMethods -join ', ')." -ForegroundColor Green
+            } else {
+                Write-Host "    WARN No strong auth method registered (FIDO2 / Authenticator / OATH TOTP / Windows Hello)." -ForegroundColor Yellow
+            }
+
             if ($weakMethods.Count -gt 0) {
-                Write-Host "    WARN Weak auth method(s) registered: $($weakMethods -join ', ') — consider FIDO2 hardware key for break-glass." -ForegroundColor Yellow
+                Write-Host "    WARN Weak method(s) also registered: $($weakMethods -join ', ') — consider removing in favour of FIDO2 hardware key." -ForegroundColor Yellow
                 $row.WeakAuthMethod = "WARN — $($weakMethods -join ', ')"
             } else {
-                Write-Host "    OK   Auth methods: $($row.AuthMethods)" -ForegroundColor Green
+                Write-Host "    OK   No weak auth methods registered." -ForegroundColor Green
                 $row.WeakAuthMethod = "OK"
             }
         } catch {
