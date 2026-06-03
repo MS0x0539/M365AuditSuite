@@ -17,34 +17,41 @@
     PHASE 2 — PIM group policies (PIM4Groups only)
         Configures the activation policy for PIM4Groups groups BEFORE member
         assignments so that permanent eligibility is enabled in time:
-        8-hour activation window, MFA + justification + ticket required,
-        permanent eligibility and active assignment allowed, notifications enabled.
+        Activation window set by $StandardActivationDuration, justification + ticket
+        required, permanent eligibility and active assignment allowed, notifications
+        enabled. Note: AuthenticationContext is not supported for group policies
+        (Microsoft API limitation) — step-up auth relies on justification + ticketing only.
 
     PHASE 3 — Group membership
         Ensures each group contains exactly the members defined in $GroupConfigs.
         Unexpected members are removed (drift correction). Users not found in the
         tenant are flagged and skipped. For PIM4Groups, users are assigned as
-        eligible members via EasyPIM instead of direct membership.
+        eligible members via EasyPIM instead of direct membership. Time-limited
+        eligible assignments are corrected to permanent automatically.
 
     PHASE 4 — Group role assignments
         Assigns the active and eligible Entra ID roles defined per group. Assignments
         are made to the group object itself (not to individual users). Already-assigned
-        roles are skipped gracefully.
+        roles are skipped gracefully. Time-limited assignments are corrected to permanent.
 
     PHASE 5 — Standard PIM role policies (all roles, no approval)
         Applies the standard role policy to every role in $StandardRoles:
-        MFA + justification + ticket on activation, authentication context c1,
-        notifications to the configured recipients. No approval required.
+        justification + ticket on activation, authentication context $AuthContextId,
+        activation window $StandardActivationDuration, notifications to configured
+        recipients. No approval required. Throttle-resilient (auto-retry on 429).
 
     PHASE 6 — Privileged PIM role policies (5 roles, approval required)
-        Applies an elevated policy to the 5 most sensitive roles:
-          Global Administrator, Privileged Role Administrator,
-          Privileged Authentication Administrator, Security Administrator,
-          Conditional Access Administrator.
         Same requirements as Phase 5 plus mandatory approval from two approver groups.
-        Activation window is limited to 4 hours.
+        Activation window set by $PrivilegedActivationDuration. Throttle-resilient.
 
-    PHASE 7 — Summary report
+    PHASE 7 — Direct assignment audit
+        Scans the tenant for Entra ID roles assigned directly to users (bypassing PIM
+        groups). Covers both permanent direct assignments and PIM-managed active
+        assignments with memberType 'Direct'. Results are grouped by role and printed
+        as a WARN so they surface in the end summary. Any findings indicate drift from
+        the intended PIM group model and should be reviewed.
+
+    PHASE 8 — Summary report
         Prints a full breakdown of every action taken, grouped by phase, with
         OK / WARN / ERR status. Any errors result in a non-zero exit code.
 
@@ -57,11 +64,16 @@
 
 .NOTES
     Author      : Melih Sivrikaya
-    Permissions : Group.ReadWrite.All, GroupMember.ReadWrite.All, User.Read.All,
-                  RoleManagement.ReadWrite.Directory,
-                  Policy.ReadWrite.PermissionGrant,
+    Permissions : Directory.ReadWrite.All,
+                  Group.ReadWrite.All,
                   Policy.Read.All,
-                  PrivilegedAccess.ReadWrite.AzureADGroup
+                  PrivilegedAccess.ReadWrite.AzureAD,
+                  PrivilegedAccess.ReadWrite.AzureADGroup,
+                  PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup,
+                  PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup,
+                  RoleManagement.ReadWrite.Directory,
+                  RoleManagementPolicy.ReadWrite.AzureADGroup,
+                  RoleManagementPolicy.ReadWrite.Directory
                   (application permissions — grant admin consent)
     Auth        : Certificate-based (app registration: EasyPIM)
     Requires    : Microsoft.Graph.Authentication, Microsoft.Graph.Groups,
@@ -71,6 +83,7 @@
 #Requires -Version 5.1
 
 param (
+    [Alias('WhatIf')]
     [switch] $DryRun
 )
 
@@ -78,12 +91,17 @@ param (
 # Tenant configuration
 # =====================
 $TenantId              = "58288310-2b28-42b6-883b-dcef687a4e29"
+$TenantDisplayName     = "PSBV"
 $AppId                 = "e3febffa-d27e-4193-936f-f3ca01b24af8"
 $CertificateThumbprint = "6805FD0B9EBA398B82CB59CA87E67E2FD3075657"
 
 # =====================
 # Policy configuration
 # =====================
+$AuthContextId                = "c1"     # Authentication context ID used in Phase 5/6 and PRE-CA check
+$StandardActivationDuration   = "PT8H"   # Activation window for standard roles (Phase 5) and PIM4Groups (Phase 2)
+$PrivilegedActivationDuration = "PT4H"   # Activation window for privileged roles with approval (Phase 6)
+
 $Justification = "PIM onboarding / authorization matrix enforcement | EasyPIM"
 
 $Recipients = @(
@@ -92,9 +110,10 @@ $Recipients = @(
 )
 
 # Activation requirements (used for role activation and PIM4Groups activation)
+# Note: MultiFactorAuthentication is intentionally omitted here — when AuthenticationContext
+# is enabled ($AuthContextId), the CA policy enforces MFA. Including it would trigger MfaAndAcrsConflict.
 $ActivationRequirements = @(
     "Justification"
-    "MultiFactorAuthentication"
     "Ticketing"
 )
 
@@ -141,8 +160,10 @@ $StandardRoles = @(
     "Attribute Log Reader"
     "Attribute Provisioning Administrator"
     "Attribute Provisioning Reader"
+    "AI Reader"
     "Authentication Administrator"
     "Authentication Extensibility Administrator"
+    "Authentication Extensibility Password Administrator"
     "Authentication Policy Administrator"
     "Azure DevOps Administrator"
     "Azure Information Protection Administrator"
@@ -154,6 +175,7 @@ $StandardRoles = @(
     "Cloud Device Administrator"
     "Compliance Administrator"
     "Compliance Data Administrator"
+    "Customer Delegated Admin Relationship Administrator"
     "Customer LockBox Access Approver"
     "Desktop Analytics Administrator"
     "Directory Readers"
@@ -164,6 +186,8 @@ $StandardRoles = @(
     "Dynamics 365 Business Central Administrator"
     "Edge Administrator"
     "Exchange Administrator"
+    "Entra Backup Administrator"
+    "Entra Backup Reader"
     "Exchange Backup Administrator"
     "Exchange Recipient Administrator"
     "Extended Directory User Administrator"
@@ -209,6 +233,9 @@ $StandardRoles = @(
     "Places Administrator"
     "Power Platform Administrator"
     "Printer Administrator"
+    "Purview Workload Content Administrator"
+    "Purview Workload Content Reader"
+    "Purview Workload Content Writer"
     "Printer Technician"
     "Reports Reader"
     "Search Administrator"
@@ -223,12 +250,17 @@ $StandardRoles = @(
     "Skype for Business Administrator"
     "Teams Administrator"
     "Teams Communications Administrator"
+    "Teams Communications Support Engineer"
     "Teams Communications Support Specialist"
-    "Teams Communications Support Specialist"
+    "Teams External Collaboration Administrator"
     "Teams Devices Administrator"
     "Teams Reader"
     "Teams Telephony Administrator"
     "Tenant Creator"
+    "Tenant Governance Administrator"
+    "Tenant Governance Reader"
+    "Tenant Governance Relationship Administrator"
+    "Tenant Governance Relationship Reader"
     "Usage Summary Reports Reader"
     "User Administrator"
     "User Experience Success Manager"
@@ -237,8 +269,8 @@ $StandardRoles = @(
     "Viva Goals Administrator"
     "Viva Pulse Administrator"
     "Windows 365 Administrator"
-    "Windows Update Deployment Administrator"
     "Yammer Administrator"
+    "Windows Update Deployment Administrator"
 )
 
 # =====================
@@ -425,7 +457,16 @@ $GroupConfigs = @(
         DisplayName   = "AAD_SEC_AADRoles_AzureInfra"
         Description   = "Role-assignable group for Azure / Infra (S&S) — read in tenant and Hybrid Administrator eligible."
         PIM4Group     = $false
-        Users         = @()
+        Users         = @(
+            "Beheer Arjan Visscher"
+            "Beheer Tessa Blom"
+            "Beheer Gijs Hendrikx"
+            "Beheer Sofie Wolters"
+            "Beheer Martijn Groen"
+            "Beheer Sjoerd Koolen"
+            "Beheer Mandy Verbruggen"
+            "Beheer Hugo van Zanten"
+        )
         EligibleRoles = @(
             "Hybrid Identity Administrator"
         )
@@ -571,6 +612,11 @@ $GroupConfigs = @(
 # SCRIPT INTERNALS — do not edit below this line
 # ===========================================================================
 
+# ── Transcript — started after Graph connect so tenant name can be resolved ──
+$script:RunTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$transcriptFolder    = $null
+$transcriptFile      = $null
+
 # ── Error / result tracking ─────────────────────────────────────────────────
 $script:Log = [System.Collections.Generic.List[PSCustomObject]]::new()
 
@@ -603,7 +649,36 @@ function Write-PIMLog {
     Write-Host "$($entry.Time) $prefix [$Phase] $Message" -ForegroundColor $color
 }
 
+# ── Throttle-resilient retry wrapper ─────────────────────────────────────────
+# Runs $ScriptBlock up to $MaxRetries times; retries on 429 with exponential back-off.
+# Uses & (not dot-source) so outer script variables are readable via scope chain.
+function Invoke-WithRetry {
+    param(
+        [scriptblock] $ScriptBlock,
+        [string]      $Phase,
+        [string]      $Label,
+        [int]         $MaxRetries = 3
+    )
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            & $ScriptBlock
+            return
+        } catch {
+            $msg = $_.Exception.Message
+            if ($msg -match "429|TooManyRequests|Too Many Requests|Throttled" -and $attempt -lt $MaxRetries) {
+                $delaySec = 30 * $attempt
+                Write-PIMLog -Level WARN -Phase $Phase -Message "API throttled — waiting ${delaySec}s [retry $attempt of $($MaxRetries - 1)]: $Label"
+                Start-Sleep -Seconds $delaySec
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 # ── Module check ─────────────────────────────────────────────────────────────
+try {
+
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║       PIM Onboarding / Validation Script         ║" -ForegroundColor Cyan
@@ -633,8 +708,35 @@ foreach ($module in @(
     }
 }
 
+# EasyPIM version check
+$easyPIMModule = Get-Module EasyPIM
+if ($easyPIMModule) {
+    $minVersion = [Version]"2.3.1"
+    if ($easyPIMModule.Version -lt $minVersion) {
+        Write-Host "  WARN: EasyPIM $($easyPIMModule.Version) is older than minimum tested version $minVersion — consider: Update-Module EasyPIM" -ForegroundColor Yellow
+    } else {
+        Write-Host "  EasyPIM version: $($easyPIMModule.Version)" -ForegroundColor Green
+    }
+}
+
 # ── Connect ───────────────────────────────────────────────────────────────────
 Write-Host ""
+$tenantLabel = if ($TenantDisplayName.Length -gt 41) { $TenantDisplayName.Substring(0, 38) + "..." } else { $TenantDisplayName }
+Write-Host "╔════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+Write-Host "║                     TARGET TENANT                      ║" -ForegroundColor Yellow
+Write-Host "╠════════════════════════════════════════════════════════╣" -ForegroundColor Yellow
+Write-Host ("║  Tenant     : {0,-41}║" -f $tenantLabel) -ForegroundColor Yellow
+Write-Host ("║  Tenant ID  : {0,-41}║" -f $TenantId) -ForegroundColor Yellow
+Write-Host ("║  App ID     : {0,-41}║" -f $AppId) -ForegroundColor Yellow
+Write-Host ("║  Thumbprint : {0,-41}║" -f $CertificateThumbprint) -ForegroundColor Yellow
+Write-Host "╚════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Press Ctrl+C within 3 seconds to cancel..." -ForegroundColor DarkGray
+Start-Sleep -Seconds 1; Write-Host "  3..." -ForegroundColor DarkGray -NoNewline
+Start-Sleep -Seconds 1; Write-Host " 2..." -ForegroundColor DarkGray -NoNewline
+Start-Sleep -Seconds 1; Write-Host " 1..." -ForegroundColor DarkGray
+Write-Host ""
+
 Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Cyan
 try {
     Connect-MgGraph -TenantId $TenantId -AppId $AppId -CertificateThumbprint $CertificateThumbprint -NoWelcome -ErrorAction Stop
@@ -642,6 +744,38 @@ try {
 } catch {
     Write-Host "FATAL: Could not connect to Microsoft Graph: $_" -ForegroundColor Red
     exit 1
+}
+
+# Resolve tenant display name → Desktop/<TenantName>/OnboardingPIM/
+$orgDisplayName = "Unknown"
+try {
+    $orgResp = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/organization?`$select=displayName" `
+        -ErrorAction Stop
+    if ($orgResp.value -and $orgResp.value[0].displayName) {
+        $orgDisplayName = $orgResp.value[0].displayName -replace '[<>:"/\\|?*]', '_'
+    }
+} catch {}
+
+$transcriptFolder = Join-Path ([Environment]::GetFolderPath('Desktop')) (Join-Path $orgDisplayName "OnboardingPIM")
+try {
+    New-Item -ItemType Directory -Force -Path $transcriptFolder -ErrorAction Stop | Out-Null
+} catch {
+    $transcriptFolder = [Environment]::GetFolderPath('Desktop')
+}
+
+$transcriptFile = Join-Path $transcriptFolder ("OnboardingPIM_{0}.txt" -f $script:RunTimestamp)
+try {
+    Start-Transcript -Path $transcriptFile -NoClobber -ErrorAction Stop
+    Write-Host "Transcript : $transcriptFile" -ForegroundColor DarkGray
+    Write-Host "Author     : Melih Sivrikaya" -ForegroundColor DarkGray
+    Write-Host "Script     : OnboardingPIM.ps1" -ForegroundColor DarkGray
+    Write-Host "Run date   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+    Write-Host "Tenant     : $TenantId ($orgDisplayName)" -ForegroundColor DarkGray
+    Write-Host ""
+} catch {
+    Write-Host "Could not start transcript: $_" -ForegroundColor Yellow
+    $transcriptFile = $null
 }
 
 # ── Helper: resolve user by display name ─────────────────────────────────────
@@ -663,9 +797,224 @@ function Resolve-Group {
 
 # ── Shared notification config ────────────────────────────────────────────────
 $NotificationConfig = @{
-    isDefaultRecipientEnabled = "true"
+    isDefaultRecipientEnabled = $true
     notificationLevel         = "All"
     Recipients                = $Recipients
+}
+
+# ===========================================================================
+# PRE-FLIGHT — Permission validation
+# ===========================================================================
+Write-Host ""
+Write-Host "── PRE-FLIGHT: Permission validation ────────────────" -ForegroundColor Cyan
+
+$permissionTests = @(
+    @{ Name = "Directory.ReadWrite.All";                              Uri = "https://graph.microsoft.com/v1.0/users?`$top=1&`$select=id" }
+    @{ Name = "Group.ReadWrite.All";                                  Uri = "https://graph.microsoft.com/v1.0/groups?`$top=1&`$select=id" }
+    @{ Name = "RoleManagement.ReadWrite.Directory";                   Uri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$top=1&`$select=displayName" }
+    @{ Name = "RoleManagementPolicy.ReadWrite.Directory";             Uri = "https://graph.microsoft.com/v1.0/policies/roleManagementPolicies?`$top=1&`$select=id" }
+    @{ Name = "Policy.Read.All";                                      Uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$top=1&`$select=id" }
+    @{ Name = "PrivilegedAccess.ReadWrite.AzureADGroup";              Uri = "https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/eligibilitySchedules?`$top=1&`$select=id" }
+    @{ Name = "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup";  Uri = "https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentSchedules?`$top=1&`$select=id" }
+)
+
+foreach ($test in $permissionTests) {
+    try {
+        Invoke-MgGraphRequest -Method GET -Uri $test.Uri -ErrorAction Stop | Out-Null
+        Write-PIMLog -Level OK -Phase "PRE-PERM" -Message "Permission OK: $($test.Name)"
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -match "BadRequest|Bad Request") {
+            # 400 BadRequest means the server responded — permission is granted, endpoint just needs specific parameters
+            Write-PIMLog -Level OK -Phase "PRE-PERM" -Message "Permission OK: $($test.Name)"
+        } elseif ($msg -match "Forbidden|Unauthorized|Authorization") {
+            Write-PIMLog -Level WARN -Phase "PRE-PERM" -Message "Permission MISSING: $($test.Name) — grant admin consent in the app registration"
+        } else {
+            Write-PIMLog -Level INFO -Phase "PRE-PERM" -Message "Permission check inconclusive for $($test.Name): $msg"
+        }
+    }
+}
+
+# ── Authentication context + Conditional Access check ────────────────────────
+Write-Host ""
+Write-Host "── PRE-FLIGHT: Authentication context check ─────────" -ForegroundColor Cyan
+
+$script:C1AuthContextOk = $false
+$script:C1CAPolicyOk    = $false
+
+try {
+    # Use the individual item GET — avoids list-endpoint SDK header injection issues
+    $c1Ctx = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/identity/authenticationContextClassReferences/$AuthContextId" `
+        -ErrorAction Stop
+
+    if ($c1Ctx.isAvailable -eq $true) {
+        $script:C1AuthContextOk = $true
+        Write-PIMLog -Level OK -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' found and available: $($c1Ctx.displayName)"
+    } else {
+        Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' exists ('$($c1Ctx.displayName)') but is NOT marked available — enable it in Entra > Protection > Authentication contexts."
+    }
+} catch {
+    $errMsg = $_.Exception.Message
+    if ($errMsg -match "404|NotFound|Not Found|ResourceNotFound") {
+        Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' not found — create it under Entra > Protection > Authentication contexts."
+    } elseif ($errMsg -match "BadRequest|Bad Request") {
+        # Graph returns 400 on this endpoint for some tenants — server responded, so context likely exists; CA policy check below is the real gate
+        $script:C1AuthContextOk = $true
+        Write-PIMLog -Level OK -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' — individual lookup not supported by API; CA policy check will confirm."
+    } else {
+        Write-PIMLog -Level INFO -Phase "PRE-CA" -Message "Could not verify authentication context '$AuthContextId' via API ($errMsg) — check manually in Entra > Protection > Authentication contexts."
+        $script:C1AuthContextOk = $true
+    }
+}
+
+try {
+    $caPolicies = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$select=displayName,state,conditions" `
+        -ErrorAction Stop
+
+    # Graph v1.0 stores auth context under conditions.applications.includeAuthenticationContextClassReferences
+    # as a plain string array (e.g. ["c1"]) — not an object with {id: "c1"}.
+    # JSON matching is used to avoid property-navigation issues with hashtable vs PSObject responses.
+    $authContextPattern = [regex]::Escape($AuthContextId)
+    $c1Policies = $caPolicies.value | Where-Object {
+        $policyJson = $_ | ConvertTo-Json -Depth 10 -Compress
+        $policyJson -match '"includeAuthenticationContextClassReferences"' -and
+        $policyJson -match ('"' + $authContextPattern + '"')
+    }
+
+    if ($c1Policies.Count -gt 0) {
+        $enabledCount = ($c1Policies | Where-Object { $_.state -eq "enabled" }).Count
+        foreach ($policy in $c1Policies) {
+            $stateLabel = if ($policy.state -eq "enabled") { "enabled" } else { "⚠ $($policy.state)" }
+            Write-PIMLog -Level OK -Phase "PRE-CA" -Message "CA policy targeting '$AuthContextId': '$($policy.displayName)' [$stateLabel]"
+        }
+        if ($enabledCount -gt 0) {
+            $script:C1CAPolicyOk = $true
+        } else {
+            Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "CA policies targeting '$AuthContextId' exist but none are enabled."
+        }
+    } else {
+        if ($script:C1AuthContextOk) {
+            Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' is available in the tenant but not in use in any CA policy — create a policy targeting '$AuthContextId' to enforce step-up auth on PIM activation."
+        } else {
+            Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "No Conditional Access policy found targeting authentication context '$AuthContextId'."
+        }
+    }
+} catch {
+    Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "Could not retrieve Conditional Access policies: $($_.Exception.Message)"
+}
+
+# Combined enforcement check — logged as WARN so it always surfaces in the end summary
+if (-not $script:C1AuthContextOk -or -not $script:C1CAPolicyOk) {
+    $missing = @()
+    if (-not $script:C1AuthContextOk) { $missing += "authentication context '$AuthContextId' (create it under Protection > Authentication contexts)" }
+    if (-not $script:C1CAPolicyOk)    { $missing += "an enabled Conditional Access policy targeting '$AuthContextId' (required to enforce step-up auth on PIM activation)" }
+    Write-PIMLog -Level WARN -Phase "PRE-CA" -Message "⚠ Authentication enforcement is INCOMPLETE. Missing: $($missing -join '; ')"
+} else {
+    Write-PIMLog -Level OK -Phase "PRE-CA" -Message "Authentication context '$AuthContextId' and CA enforcement are fully in place."
+}
+
+# ── License validation ────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "── PRE-FLIGHT: License validation ───────────────────" -ForegroundColor Cyan
+
+$p2SkuPartNumbers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+@(
+    "AAD_PREMIUM_P2"             # Azure AD Premium P2 (standalone)
+    "ENTRA_IDENTITY_GOV"         # Microsoft Entra ID Governance
+    "SPE_E5"                     # Microsoft 365 E5
+    "EMSPREMIUM"                 # Enterprise Mobility + Security E5
+    "M365_G5"                    # Microsoft 365 G5
+    "IDENTITY_THREAT_PROTECTION" # Microsoft 365 E5 Security add-on
+) | ForEach-Object { [void] $p2SkuPartNumbers.Add($_) }
+
+try {
+    $skuResp    = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/subscribedSkus?`$select=skuPartNumber,capabilityStatus" `
+        -ErrorAction Stop
+    $matchedSku = $skuResp.value |
+        Where-Object { $_.capabilityStatus -eq "Enabled" -and $p2SkuPartNumbers.Contains($_.skuPartNumber) } |
+        Select-Object -First 1
+
+    if ($matchedSku) {
+        Write-PIMLog -Level OK -Phase "PRE-LIC" -Message "License verified: $($matchedSku.skuPartNumber) — Entra ID P2 / Governance confirmed."
+    } else {
+        $allEnabled = ($skuResp.value | Where-Object { $_.capabilityStatus -eq "Enabled" } |
+            Select-Object -ExpandProperty skuPartNumber) -join ", "
+        Write-PIMLog -Level WARN -Phase "PRE-LIC" -Message "No Entra ID P2 or Governance license detected — PIM operations will fail. Enabled SKUs: $allEnabled"
+    }
+} catch {
+    Write-PIMLog -Level WARN -Phase "PRE-LIC" -Message "Could not verify license: $($_.Exception.Message)"
+}
+
+# ── Entra role discovery — auto-expand $StandardRoles ────────────────────────
+Write-Host ""
+Write-Host "── PRE-FLIGHT: Entra role discovery ─────────────────" -ForegroundColor Cyan
+
+try {
+    $allTenantRoles = [System.Collections.Generic.List[string]]::new()
+    $roleUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=displayName,isEnabled,isBuiltIn"
+    do {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $roleUri -ErrorAction Stop
+        foreach ($role in $response.value) {
+            if ($role.isEnabled -eq $true -and $role.isBuiltIn -eq $true) {
+                $allTenantRoles.Add($role.displayName)
+            }
+        }
+        $roleUri = $response.'@odata.nextLink'
+    } while ($roleUri)
+
+    # Build a set of all roles already explicitly managed
+    $managedRoles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $StandardRoles)   { [void] $managedRoles.Add($r) }
+    foreach ($r in $PrivilegedRoles) { [void] $managedRoles.Add($r) }
+
+    # Roles that should never receive a PIM activation policy — not admin roles
+    $excludedFromPolicy = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    @(
+        "User"
+        "Guest User"
+        "Restricted Guest User"
+        "Device Join"
+        "Device Users"
+        "Device Managers"
+        "Workplace Device Join"
+        "Directory Synchronization Accounts"
+        "On Premises Directory Sync Account"
+        "Partner Tier1 Support"
+        "Partner Tier2 Support"
+    ) | ForEach-Object { [void] $excludedFromPolicy.Add($_) }
+
+    # Find roles in the tenant not yet in either list and not excluded
+    $newRoles = $allTenantRoles | Where-Object {
+        -not $managedRoles.Contains($_) -and -not $excludedFromPolicy.Contains($_)
+    } | Sort-Object
+
+    if ($newRoles.Count -eq 0) {
+        Write-PIMLog -Level OK -Phase "PRE-DISC" -Message "All $($allTenantRoles.Count) tenant roles are accounted for in the policy lists."
+    } else {
+        Write-PIMLog -Level INFO -Phase "PRE-DISC" -Message "Discovered $($newRoles.Count) role(s) not in policy lists — adding to standard policy scope:"
+        foreach ($r in $newRoles) {
+            Write-PIMLog -Level INFO -Phase "PRE-DISC" -Message "  + $r"
+            $script:StandardRoles += $r
+        }
+        Write-PIMLog -Level OK -Phase "PRE-DISC" -Message "Standard role list expanded to $($script:StandardRoles.Count) roles for Phase 5."
+    }
+
+    # Filter $StandardRoles to only roles that actually exist in this tenant.
+    # Prevents false ERRs in Phase 5 for preview/future roles in the static list.
+    $tenantRoleSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $allTenantRoles) { [void] $tenantRoleSet.Add($r) }
+    $removedCount = 0
+    $script:StandardRoles = @($script:StandardRoles | Where-Object {
+        if ($tenantRoleSet.Contains($_)) { $true } else { $removedCount++; $false }
+    })
+    if ($removedCount -gt 0) {
+        Write-PIMLog -Level INFO -Phase "PRE-DISC" -Message "Removed $removedCount role(s) from standard list — not present in this tenant (preview/future roles)."
+    }
+} catch {
+    Write-PIMLog -Level WARN -Phase "PRE-DISC" -Message "Could not fetch tenant role definitions — Phase 5 will use the static list only: $($_.Exception.Message)"
 }
 
 # ===========================================================================
@@ -692,52 +1041,12 @@ foreach ($displayName in $allConfiguredUsers) {
 }
 
 if ($missingUsers.Count -eq 0) {
-    Write-PIMLog -Level OK -Phase "PRE" -Message "All $($allConfiguredUsers.Count) configured users found in tenant."
+    Write-PIMLog -Level OK -Phase "PRE-USR" -Message "All $($allConfiguredUsers.Count) configured users found in tenant."
 } else {
-    Write-PIMLog -Level WARN -Phase "PRE" -Message "$($missingUsers.Count) of $($allConfiguredUsers.Count) users not found in tenant — they will be skipped in Phase 3."
+    Write-PIMLog -Level WARN -Phase "PRE-USR" -Message "$($missingUsers.Count) of $($allConfiguredUsers.Count) users not found in tenant — they will be skipped in Phase 3."
     foreach ($missing in $missingUsers) {
-        Write-PIMLog -Level WARN -Phase "PRE" -Message "Not found: $missing"
+        Write-PIMLog -Level WARN -Phase "PRE-USR" -Message "Not found: $missing"
     }
-}
-
-# ── Authentication context + Conditional Access check ────────────────────────
-Write-Host ""
-Write-Host "── PRE-FLIGHT: Authentication context check ─────────" -ForegroundColor Cyan
-
-try {
-    $authContextResponse = Invoke-MgGraphRequest -Method GET `
-        -Uri "https://graph.microsoft.com/v1.0/identity/authenticationContextClassReferences/c1" `
-        -ErrorAction Stop
-
-    if ($authContextResponse.isAvailable -eq $true) {
-        Write-PIMLog -Level OK -Phase "PRE" -Message "Authentication context 'c1' exists and is available: $($authContextResponse.displayName)"
-    } else {
-        Write-PIMLog -Level WARN -Phase "PRE" -Message "Authentication context 'c1' exists but is NOT marked available — Phases 5/6 will set it on role policies but it won't be enforced."
-    }
-} catch {
-    Write-PIMLog -Level WARN -Phase "PRE" -Message "Authentication context 'c1' not found — Phases 5/6 will still apply it to role policies but no enforcement will occur until a CA policy is created."
-}
-
-try {
-    $caPolicies = Invoke-MgGraphRequest -Method GET `
-        -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$select=displayName,state,conditions" `
-        -ErrorAction Stop
-
-    $c1Policies = $caPolicies.value | Where-Object {
-        $_.conditions.authenticationContext.authenticationContextClassReferences |
-            Where-Object { $_.id -eq "c1" }
-    }
-
-    if ($c1Policies.Count -gt 0) {
-        foreach ($policy in $c1Policies) {
-            $stateLabel = if ($policy.state -eq "enabled") { "enabled" } else { "⚠ $($policy.state)" }
-            Write-PIMLog -Level OK -Phase "PRE" -Message "CA policy targeting 'c1' found: '$($policy.displayName)' [$stateLabel]"
-        }
-    } else {
-        Write-PIMLog -Level WARN -Phase "PRE" -Message "No Conditional Access policy found targeting authentication context 'c1' — role activation will not enforce it until one is created."
-    }
-} catch {
-    Write-PIMLog -Level WARN -Phase "PRE" -Message "Could not retrieve Conditional Access policies: $($_.Exception.Message)"
 }
 
 # ===========================================================================
@@ -753,6 +1062,11 @@ foreach ($config in $GroupConfigs) {
     if ($existing) {
         $config['_GroupId'] = $existing.Id
         Write-PIMLog -Level OK -Phase "P1" -Message "Group exists: $groupName (Id: $($existing.Id))"
+
+        # Check isAssignableToRole — cannot be changed after creation, warn if wrong
+        if ($existing.IsAssignableToRole -ne $true) {
+            Write-PIMLog -Level WARN -Phase "P1" -Message "Group '$groupName' is NOT role-assignable (isAssignableToRole = false). PIM role assignments will fail. The group must be deleted and recreated with isAssignableToRole = true."
+        }
 
         # Check description drift
         if ($existing.Description -ne $config.Description) {
@@ -812,27 +1126,46 @@ foreach ($config in $GroupConfigs | Where-Object { $_.PIM4Group -eq $true }) {
         continue
     }
 
+    # Note: Set-PIMGroupPolicy does not support -AuthenticationContext_Enabled — this is a
+    # Microsoft API limitation. AuthContext enforcement is not available for group activation
+    # policies (only for role policies in Phase 5/6). Step-up auth for EXOGSAIN group
+    # membership activation relies solely on Justification+Ticketing requirements.
     if ($DryRun) {
-        Write-PIMLog -Level INFO -Phase "P2" -Message "[DRY RUN] Would apply PIM group policy (8h, MFA+justification+ticket): $groupName"
+        Write-PIMLog -Level INFO -Phase "P2" -Message "[DRY RUN] Would apply PIM group policy ($StandardActivationDuration, justification+ticket, permanent eligibility): $groupName"
     } else {
-        Write-PIMLog -Level INFO -Phase "P2" -Message "Applying PIM group policy: $groupName"
-        Write-PIMLog -Level INFO -Phase "P2" -Message "Waiting 10s before applying PIM policy..."
-        Start-Sleep -Seconds 10
-
         try {
-            Set-PIMGroupPolicy `
-                -TenantID                       $TenantId `
-                -GroupID                        $groupId `
-                -Type                           "member" `
-                -ActivationDuration             "PT8H" `
-                -ActivationRequirement          $ActivationRequirements `
-                -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
-                -AllowPermanentEligibility      $true `
-                -AllowPermanentActiveAssignment $true `
-                -Notification_EligibleAssignment_Alert $NotificationConfig `
-                -Notification_ActiveAssignment_Alert   $NotificationConfig `
-                -Notification_Activation_Alert         $NotificationConfig
-            Write-PIMLog -Level OK -Phase "P2" -Message "PIM policy applied: $groupName"
+            $currentGroupPolicy = Get-PIMGroupPolicy -TenantID $TenantId -GroupID $groupId -Type "member" -ErrorAction SilentlyContinue
+
+            $groupEnablementRules = ($currentGroupPolicy.EnablementRules -split ',').Trim()
+            $groupPolicyOk = (
+                $currentGroupPolicy.ActivationDuration               -eq $StandardActivationDuration -and
+                $currentGroupPolicy.AllowPermanentEligibleAssignment  -eq $true  -and
+                $currentGroupPolicy.AllowPermanentActiveAssignment    -eq $true  -and
+                ($groupEnablementRules -contains 'Justification')               -and
+                ($groupEnablementRules -contains 'Ticketing')
+            )
+
+            if ($groupPolicyOk) {
+                Write-PIMLog -Level OK -Phase "P2" -Message "Already configured: $groupName"
+            } else {
+                Write-PIMLog -Level INFO -Phase "P2" -Message "Applying PIM group policy: $groupName"
+                Write-PIMLog -Level INFO -Phase "P2" -Message "Waiting 10s before applying PIM policy..."
+                Start-Sleep -Seconds 10
+
+                Set-PIMGroupPolicy `
+                    -TenantID                       $TenantId `
+                    -GroupID                        $groupId `
+                    -Type                           "member" `
+                    -ActivationDuration             $StandardActivationDuration `
+                    -ActivationRequirement          $ActivationRequirements `
+                    -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
+                    -AllowPermanentEligibility      $true `
+                    -AllowPermanentActiveAssignment $true `
+                    -Notification_EligibleAssignment_Alert $NotificationConfig `
+                    -Notification_ActiveAssignment_Alert   $NotificationConfig `
+                    -Notification_Activation_Alert         $NotificationConfig
+                Write-PIMLog -Level OK -Phase "P2" -Message "PIM policy applied: $groupName"
+            }
         } catch {
             Write-PIMLog -Level ERR -Phase "P2" -Message "Failed to apply PIM policy on '$groupName': $($_.Exception.Message)"
         }
@@ -864,11 +1197,15 @@ foreach ($config in $GroupConfigs) {
         }
     }
 
-    # ── Drift removal (regular groups only) ──────────────────────────────────
+    # ── Drift removal + current state snapshot ───────────────────────────────
+    $currentEligibleIds = [System.Collections.Generic.HashSet[string]]::new()
+    $currentMemberIds   = [System.Collections.Generic.HashSet[string]]::new()
+
     if (-not $config.PIM4Group) {
         $currentMembers = Get-MgGroupMember -GroupId $groupId -All -ErrorAction SilentlyContinue
 
         foreach ($member in $currentMembers) {
+            [void] $currentMemberIds.Add($member.Id)
             if (-not $expectedIds.Contains($member.Id)) {
                 $memberDisplay = $member.AdditionalProperties['displayName']
                 if ($DryRun) {
@@ -884,10 +1221,28 @@ foreach ($config in $GroupConfigs) {
             }
         }
     } else {
-        # PIM4Group: compare current eligible members against config and remove drift
+        # PIM4Group: fetch current eligible members for both drift removal and skip-check
         $currentEligible = Get-PIMGroupEligibleAssignment -TenantID $TenantId -GroupID $groupId -Type "member" -ErrorAction SilentlyContinue
 
         foreach ($assignment in $currentEligible) {
+            # Only treat as "already correctly assigned" if permanent
+            $isPermanent = [string]::IsNullOrEmpty($assignment.endDateTime)
+            if ($isPermanent) {
+                [void] $currentEligibleIds.Add($assignment.principalid)
+            } else {
+                if ($expectedIds.Contains($assignment.principalid)) {
+                    Write-PIMLog -Level WARN -Phase "P3" -Message "Eligible assignment for '$($assignment.principalName)' → '$groupName' is time-limited (expires: $($assignment.endDateTime)) — removing to re-assign as permanent"
+                    if (-not $DryRun) {
+                        try {
+                            Remove-PIMGroupEligibleAssignment -TenantID $TenantId -GroupID $groupId -PrincipalID $assignment.principalid -Type "member" -Justification $Justification -ErrorAction Stop
+                            Write-PIMLog -Level INFO -Phase "P3" -Message "Removed time-limited eligible assignment: $($assignment.principalName) → $groupName"
+                        } catch {
+                            Write-PIMLog -Level WARN -Phase "P3" -Message "Could not remove time-limited assignment for '$($assignment.principalName)': $($_.Exception.Message)"
+                        }
+                    }
+                }
+            }
+
             if (-not $expectedIds.Contains($assignment.principalid)) {
                 $principalDisplay = $assignment.principalName
                 if ($DryRun) {
@@ -918,6 +1273,8 @@ foreach ($config in $GroupConfigs) {
             # PIM4Groups: add as eligible member via EasyPIM
             if ($DryRun) {
                 Write-PIMLog -Level INFO -Phase "P3" -Message "[DRY RUN] Would assign eligible member: $displayName → $groupName"
+            } elseif ($currentEligibleIds.Contains($userObj.Id)) {
+                Write-PIMLog -Level OK -Phase "P3" -Message "Already eligible: $displayName → $groupName"
             } else {
                 try {
                     New-PIMGroupEligibleAssignment `
@@ -929,8 +1286,7 @@ foreach ($config in $GroupConfigs) {
                         -Permanent | Out-Null
                     Write-PIMLog -Level OK -Phase "P3" -Message "Eligible member assigned: $displayName → $groupName"
                 } catch {
-                    # EasyPIM throws if already assigned — treat as OK
-                    if ($_.Exception.Message -match "already") {
+                    if ($_.Exception.Message -match "already|BadRequest") {
                         Write-PIMLog -Level OK -Phase "P3" -Message "Already eligible: $displayName → $groupName"
                     } else {
                         Write-PIMLog -Level ERR -Phase "P3" -Message "Failed eligible assignment '$displayName' → '$groupName': $($_.Exception.Message)"
@@ -940,20 +1296,19 @@ foreach ($config in $GroupConfigs) {
         } else {
             # Regular group: add as direct member
             if ($DryRun) {
-                Write-PIMLog -Level INFO -Phase "P3" -Message "[DRY RUN] Would add member: $displayName → $groupName"
-            } else {
-                $isMember = Get-MgGroupMember -GroupId $groupId -All -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Id -eq $userObj.Id }
-
-                if ($isMember) {
-                    Write-PIMLog -Level OK -Phase "P3" -Message "Already member: $displayName → $groupName"
+                if ($currentMemberIds.Contains($userObj.Id)) {
+                    Write-PIMLog -Level OK   -Phase "P3" -Message "Already member: $displayName → $groupName"
                 } else {
-                    try {
-                        New-MgGroupMember -GroupId $groupId -DirectoryObjectId $userObj.Id -ErrorAction Stop
-                        Write-PIMLog -Level OK -Phase "P3" -Message "Added member: $displayName → $groupName"
-                    } catch {
-                        Write-PIMLog -Level ERR -Phase "P3" -Message "Failed to add '$displayName' → '$groupName': $($_.Exception.Message)"
-                    }
+                    Write-PIMLog -Level INFO -Phase "P3" -Message "[DRY RUN] Would add member: $displayName → $groupName"
+                }
+            } elseif ($currentMemberIds.Contains($userObj.Id)) {
+                Write-PIMLog -Level OK -Phase "P3" -Message "Already member: $displayName → $groupName"
+            } else {
+                try {
+                    New-MgGroupMember -GroupId $groupId -DirectoryObjectId $userObj.Id -ErrorAction Stop
+                    Write-PIMLog -Level OK -Phase "P3" -Message "Added member: $displayName → $groupName"
+                } catch {
+                    Write-PIMLog -Level ERR -Phase "P3" -Message "Failed to add '$displayName' → '$groupName': $($_.Exception.Message)"
                 }
             }
         }
@@ -975,9 +1330,91 @@ foreach ($config in $GroupConfigs) {
         continue
     }
 
+    # Fetch current role assignments upfront — always run (needed for DryRun reporting too)
+    # Only add to "already assigned" sets if the assignment is permanent (noExpiration)
+    $assignedEligibleRoles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $assignedActiveRoles   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $timedEligibleRoles    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $timedActiveRoles      = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    try {
+        $eligUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?`$filter=principalId eq '$groupId'&`$expand=roleDefinition(`$select=displayName)"
+        do {
+            $resp = Invoke-MgGraphRequest -Method GET -Uri $eligUri -ErrorAction SilentlyContinue
+            foreach ($inst in $resp.value) {
+                $expType = $inst.scheduleInfo.expiration.type
+                if ($expType -eq 'noExpiration' -or [string]::IsNullOrEmpty($expType)) {
+                    [void] $assignedEligibleRoles.Add($inst.roleDefinition.displayName)
+                } else {
+                    [void] $timedEligibleRoles.Add($inst.roleDefinition.displayName)
+                    Write-PIMLog -Level WARN -Phase "P4" -Message "[Eligible] Time-limited assignment detected: $($inst.roleDefinition.displayName) → $groupName (expires: $($inst.scheduleInfo.expiration.endDateTime))"
+                }
+            }
+            $eligUri = $resp.'@odata.nextLink'
+        } while ($eligUri)
+    } catch {}
+
+    try {
+        $actUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$groupId'&`$expand=roleDefinition(`$select=displayName)"
+        do {
+            $resp = Invoke-MgGraphRequest -Method GET -Uri $actUri -ErrorAction SilentlyContinue
+            foreach ($inst in $resp.value) {
+                $expType = $inst.scheduleInfo.expiration.type
+                if ($expType -eq 'noExpiration' -or [string]::IsNullOrEmpty($expType)) {
+                    [void] $assignedActiveRoles.Add($inst.roleDefinition.displayName)
+                } else {
+                    [void] $timedActiveRoles.Add($inst.roleDefinition.displayName)
+                    Write-PIMLog -Level WARN -Phase "P4" -Message "[Active  ] Time-limited assignment detected: $($inst.roleDefinition.displayName) → $groupName (expires: $($inst.scheduleInfo.expiration.endDateTime))"
+                }
+            }
+            $actUri = $resp.'@odata.nextLink'
+        } while ($actUri)
+    } catch {}
+
+    # Build config sets here — used both for correction below and drift removal further down
+    $configActiveSet   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $configEligibleSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($r in $config.ActiveRoles)   { [void] $configActiveSet.Add($r) }
+    foreach ($r in $config.EligibleRoles) { [void] $configEligibleSet.Add($r) }
+
+    # ── Correct time-limited in-config assignments ────────────────────────────
+    # Explicitly remove them so the loops below can re-create them as permanent.
+    foreach ($role in @($timedEligibleRoles)) {
+        if ($configEligibleSet.Contains($role)) {
+            if ($DryRun) {
+                Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would remove time-limited [Eligible] $role → $groupName (to re-assign as permanent)"
+            } else {
+                try {
+                    Remove-PIMEntraRoleEligibleAssignment -TenantID $TenantId -RoleName $role -PrincipalID $groupId -Justification $Justification -ErrorAction Stop | Out-Null
+                    Write-PIMLog -Level INFO -Phase "P4" -Message "[Eligible] Removed time-limited assignment: $role → $groupName"
+                    Start-Sleep -Seconds 2
+                } catch {
+                    Write-PIMLog -Level WARN -Phase "P4" -Message "[Eligible] Could not remove time-limited '$role' → '$groupName': $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+    foreach ($role in @($timedActiveRoles)) {
+        if ($configActiveSet.Contains($role)) {
+            if ($DryRun) {
+                Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would remove time-limited [Active  ] $role → $groupName (to re-assign as permanent)"
+            } else {
+                try {
+                    Remove-PIMEntraRoleActiveAssignment -TenantID $TenantId -RoleName $role -PrincipalID $groupId -Justification $Justification -ErrorAction Stop | Out-Null
+                    Write-PIMLog -Level INFO -Phase "P4" -Message "[Active  ] Removed time-limited assignment: $role → $groupName"
+                    Start-Sleep -Seconds 2
+                } catch {
+                    Write-PIMLog -Level WARN -Phase "P4" -Message "[Active  ] Could not remove time-limited '$role' → '$groupName': $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+
     foreach ($role in $config.ActiveRoles) {
         if ($DryRun) {
             Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would assign [Active  ] $role → $groupName"
+        } elseif ($assignedActiveRoles.Contains($role)) {
+            Write-PIMLog -Level OK -Phase "P4" -Message "[Active  ] Already assigned: $role → $groupName"
         } else {
             try {
                 New-PIMEntraRoleActiveAssignment `
@@ -988,7 +1425,7 @@ foreach ($config in $GroupConfigs) {
                     -Permanent | Out-Null
                 Write-PIMLog -Level OK -Phase "P4" -Message "[Active  ] $role → $groupName"
             } catch {
-                if ($_.Exception.Message -match "already") {
+                if ($_.Exception.Message -match "already|BadRequest") {
                     Write-PIMLog -Level OK -Phase "P4" -Message "[Active  ] Already assigned: $role → $groupName"
                 } else {
                     Write-PIMLog -Level ERR -Phase "P4" -Message "[Active  ] Failed '$role' → '$groupName': $($_.Exception.Message)"
@@ -1001,6 +1438,8 @@ foreach ($config in $GroupConfigs) {
     foreach ($role in $config.EligibleRoles) {
         if ($DryRun) {
             Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would assign [Eligible] $role → $groupName"
+        } elseif ($assignedEligibleRoles.Contains($role)) {
+            Write-PIMLog -Level OK -Phase "P4" -Message "[Eligible] Already assigned: $role → $groupName"
         } else {
             try {
                 New-PIMEntraRoleEligibleAssignment `
@@ -1011,13 +1450,47 @@ foreach ($config in $GroupConfigs) {
                     -Permanent | Out-Null
                 Write-PIMLog -Level OK -Phase "P4" -Message "[Eligible] $role → $groupName"
             } catch {
-                if ($_.Exception.Message -match "already") {
+                if ($_.Exception.Message -match "already|BadRequest") {
                     Write-PIMLog -Level OK -Phase "P4" -Message "[Eligible] Already assigned: $role → $groupName"
                 } else {
                     Write-PIMLog -Level ERR -Phase "P4" -Message "[Eligible] Failed '$role' → '$groupName': $($_.Exception.Message)"
                 }
             }
             Start-Sleep -Seconds 2
+        }
+    }
+
+    # ── Role drift removal ────────────────────────────────────────────────────
+
+    foreach ($role in @($assignedActiveRoles)) {
+        if (-not $configActiveSet.Contains($role)) {
+            if ($DryRun) {
+                Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would remove [Active  ] $role ← $groupName (no longer in config)"
+            } else {
+                try {
+                    Remove-PIMEntraRoleActiveAssignment -TenantID $TenantId -RoleName $role -PrincipalID $groupId -Justification $Justification -ErrorAction Stop | Out-Null
+                    Write-PIMLog -Level OK -Phase "P4" -Message "[Active  ] Removed drift: $role ← $groupName"
+                } catch {
+                    Write-PIMLog -Level ERR -Phase "P4" -Message "[Active  ] Failed to remove '$role' ← '$groupName': $($_.Exception.Message)"
+                }
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+
+    foreach ($role in @($assignedEligibleRoles)) {
+        if (-not $configEligibleSet.Contains($role)) {
+            if ($DryRun) {
+                Write-PIMLog -Level INFO -Phase "P4" -Message "[DRY RUN] Would remove [Eligible] $role ← $groupName (no longer in config)"
+            } else {
+                try {
+                    Remove-PIMEntraRoleEligibleAssignment -TenantID $TenantId -RoleName $role -PrincipalID $groupId -Justification $Justification -ErrorAction Stop | Out-Null
+                    Write-PIMLog -Level OK -Phase "P4" -Message "[Eligible] Removed drift: $role ← $groupName"
+                } catch {
+                    Write-PIMLog -Level ERR -Phase "P4" -Message "[Eligible] Failed to remove '$role' ← '$groupName': $($_.Exception.Message)"
+                }
+                Start-Sleep -Seconds 2
+            }
         }
     }
 }
@@ -1027,24 +1500,51 @@ foreach ($config in $GroupConfigs) {
 # ===========================================================================
 Write-Host ""
 Write-Host "── PHASE 5: Standard Role Policies ──────────────────" -ForegroundColor Cyan
-Write-PIMLog -Level INFO -Phase "P5" -Message "Applying standard policy to $($StandardRoles.Count) roles..."
+$p5Total = $script:StandardRoles.Count
+$p5Index = 0
+Write-PIMLog -Level INFO -Phase "P5" -Message "Applying standard policy to $p5Total roles..."
 
 foreach ($role in $StandardRoles) {
+    $p5Index++
+    $p5Progress = "[$p5Index/$p5Total]"
     if ($DryRun) {
-        Write-PIMLog -Level INFO -Phase "P5" -Message "[DRY RUN] Would apply standard policy: $role"
+        Write-PIMLog -Level INFO -Phase "P5" -Message "$p5Progress [DRY RUN] Would apply standard policy: $role"
     } else {
         try {
-            Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
-                -ActivationRequirement          $ActivationRequirements `
-                -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
-                -AuthenticationContext_Enabled  $true `
-                -AuthenticationContext_Value    "c1" `
-                -Notification_EligibleAssignment_Alert $NotificationConfig `
-                -Notification_ActiveAssignment_Alert   $NotificationConfig `
-                -Notification_Activation_Alert         $NotificationConfig
-            Write-PIMLog -Level OK -Phase "P5" -Message "$role"
+            $currentPolicy = Get-PIMEntraRolePolicy -TenantID $TenantId -RoleName $role -ErrorAction SilentlyContinue
+
+            $p5EnablementRules  = ($currentPolicy.EnablementRules -split ',').Trim()
+            $alreadyConfigured = (
+                $currentPolicy.ActivationDuration              -eq $StandardActivationDuration -and
+                $currentPolicy.AllowPermanentEligibleAssignment -eq $true                      -and
+                $currentPolicy.AllowPermanentActiveAssignment   -eq $true                      -and
+                $currentPolicy.AuthenticationContext_Enabled   -eq $true                       -and
+                $currentPolicy.AuthenticationContext_Value     -eq $AuthContextId              -and
+                $currentPolicy.ApprovalRequired                -eq $false                      -and
+                ($p5EnablementRules -contains 'Justification')                                 -and
+                ($p5EnablementRules -contains 'Ticketing')
+            )
+
+            if ($alreadyConfigured) {
+                Write-PIMLog -Level OK -Phase "P5" -Message "$p5Progress Already configured: $role"
+            } else {
+                Invoke-WithRetry -Phase "P5" -Label $role -ScriptBlock {
+                    Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
+                        -ActivationRequirement          $ActivationRequirements `
+                        -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
+                        -ActivationDuration             $StandardActivationDuration `
+                        -AllowPermanentEligibility      $true `
+                        -AllowPermanentActiveAssignment $true `
+                        -AuthenticationContext_Enabled  $true `
+                        -AuthenticationContext_Value    $AuthContextId `
+                        -Notification_EligibleAssignment_Alert $NotificationConfig `
+                        -Notification_ActiveAssignment_Alert   $NotificationConfig `
+                        -Notification_Activation_Alert         $NotificationConfig
+                    Write-PIMLog -Level OK -Phase "P5" -Message "$p5Progress Policy applied: $role"
+                }
+            }
         } catch {
-            Write-PIMLog -Level ERR -Phase "P5" -Message "Failed '$role': $($_.Exception.Message)"
+            Write-PIMLog -Level ERR -Phase "P5" -Message "$p5Progress Failed '$role': $($_.Exception.Message)"
         }
     }
 }
@@ -1079,21 +1579,43 @@ if ($approverGroup_M365 -and $approverGroup_Security) {
 
     foreach ($role in $PrivilegedRoles) {
         if ($DryRun) {
-            Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required): $role"
+            Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy ($PrivilegedActivationDuration, approval required): $role"
         } else {
             try {
-                Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
-                    -ActivationRequirement          $ActivationRequirements `
-                    -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
-                    -ActivationDuration             "PT4H" `
-                    -AuthenticationContext_Enabled  $true `
-                    -AuthenticationContext_Value    "c1" `
-                    -ApprovalRequired               $true `
-                    -Approvers                      $Approvers `
-                    -Notification_EligibleAssignment_Alert $NotificationConfig `
-                    -Notification_ActiveAssignment_Alert   $NotificationConfig `
-                    -Notification_Activation_Alert         $NotificationConfig
-                Write-PIMLog -Level OK -Phase "P6" -Message "$role"
+                $currentPolicy = Get-PIMEntraRolePolicy -TenantID $TenantId -RoleName $role -ErrorAction SilentlyContinue
+
+                $p6EnablementRules  = ($currentPolicy.EnablementRules -split ',').Trim()
+                $alreadyConfigured = (
+                    $currentPolicy.AllowPermanentEligibleAssignment -eq $true                        -and
+                    $currentPolicy.AllowPermanentActiveAssignment   -eq $true                        -and
+                    $currentPolicy.AuthenticationContext_Enabled    -eq $true                        -and
+                    $currentPolicy.AuthenticationContext_Value      -eq $AuthContextId               -and
+                    $currentPolicy.ApprovalRequired                 -eq $true                        -and
+                    $currentPolicy.ActivationDuration               -eq $PrivilegedActivationDuration -and
+                    ($p6EnablementRules -contains 'Justification')                                   -and
+                    ($p6EnablementRules -contains 'Ticketing')
+                )
+
+                if ($alreadyConfigured) {
+                    Write-PIMLog -Level OK -Phase "P6" -Message "Already configured: $role"
+                } else {
+                    Invoke-WithRetry -Phase "P6" -Label $role -ScriptBlock {
+                        Set-PIMEntraRolePolicy -TenantId $TenantId -RoleName $role `
+                            -ActivationRequirement          $ActivationRequirements `
+                            -ActiveAssignmentRequirement    $ActiveAssignmentRequirements `
+                            -ActivationDuration             $PrivilegedActivationDuration `
+                            -AllowPermanentEligibility      $true `
+                            -AllowPermanentActiveAssignment $true `
+                            -AuthenticationContext_Enabled  $true `
+                            -AuthenticationContext_Value    $AuthContextId `
+                            -ApprovalRequired               $true `
+                            -Approvers                      $Approvers `
+                            -Notification_EligibleAssignment_Alert $NotificationConfig `
+                            -Notification_ActiveAssignment_Alert   $NotificationConfig `
+                            -Notification_Activation_Alert         $NotificationConfig
+                        Write-PIMLog -Level OK -Phase "P6" -Message "Policy applied: $role"
+                    }
+                }
             } catch {
                 Write-PIMLog -Level ERR -Phase "P6" -Message "Failed '$role': $($_.Exception.Message)"
             }
@@ -1102,10 +1624,230 @@ if ($approverGroup_M365 -and $approverGroup_Security) {
 } elseif ($DryRun) {
     Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Approver groups would be created in Phase 1 — enumerating privileged role policies:"
     foreach ($role in $PrivilegedRoles) {
-        Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy (4h, approval required, approvers: $ApproverGroupName_M365 + $ApproverGroupName_Security): $role"
+        Write-PIMLog -Level INFO -Phase "P6" -Message "[DRY RUN] Would apply privileged policy ($PrivilegedActivationDuration, approval required, approvers: $ApproverGroupName_M365 + $ApproverGroupName_Security): $role"
     }
 } else {
     Write-PIMLog -Level WARN -Phase "P6" -Message "Phase 6 skipped — one or both approver groups could not be resolved."
+}
+
+# ===========================================================================
+# PHASE 7 — Direct role assignment audit (non-group, non-PIM)
+# ===========================================================================
+Write-Host ""
+Write-Host "── PHASE 7: Direct Assignment Audit ─────────────────" -ForegroundColor Cyan
+Write-PIMLog -Level INFO -Phase "P7" -Message "Scanning for direct role assignments to users, service principals, and unmanaged groups..."
+
+# Build set of group IDs managed by this script — used to suppress expected assignments
+$managedGroupIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($config in $GroupConfigs) {
+    if ($config['_GroupId'] -and $config['_GroupId'] -ne '[DRY-RUN-ID]') {
+        [void] $managedGroupIds.Add($config['_GroupId'])
+    }
+}
+
+try {
+    # ── Step 1: Build role definition map (id → name) ─────────────────────────
+    $roleDefMap = @{}
+    $rdUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName"
+    do {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $rdUri -ErrorAction Stop
+        foreach ($rd in $resp.value) { $roleDefMap[$rd.id] = $rd.displayName }
+        $rdUri = $resp.'@odata.nextLink'
+    } while ($rdUri)
+
+    # ── Step 2: Fetch permanent direct assignments (non-PIM) ──────────────────
+    $rawAssignments = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $permUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$select=principalId,roleDefinitionId"
+    do {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $permUri -ErrorAction Stop
+        foreach ($a in $resp.value) {
+            $rawAssignments.Add([PSCustomObject]@{ PrincipalId = $a.principalId; RoleDefinitionId = $a.roleDefinitionId; AssignmentType = "Permanent (non-PIM)" })
+        }
+        $permUri = $resp.'@odata.nextLink'
+    } while ($permUri)
+
+    # ── Step 3: Fetch PIM active direct assignments (memberType = Direct) ─────
+    $pimUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleInstances?`$select=principalId,roleDefinitionId,memberType"
+    do {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $pimUri -ErrorAction Stop
+        foreach ($a in $resp.value | Where-Object { $_.memberType -eq 'Direct' }) {
+            $rawAssignments.Add([PSCustomObject]@{ PrincipalId = $a.principalId; RoleDefinitionId = $a.roleDefinitionId; AssignmentType = "PIM Active (Direct)" })
+        }
+        $pimUri = $resp.'@odata.nextLink'
+    } while ($pimUri)
+
+    # ── Step 3b: Fetch PIM eligible direct assignments ────────────────────────
+    $eligUri2 = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?`$select=principalId,roleDefinitionId,memberType"
+    do {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $eligUri2 -ErrorAction Stop
+        foreach ($a in $resp.value | Where-Object { $_.memberType -eq 'Direct' }) {
+            $rawAssignments.Add([PSCustomObject]@{ PrincipalId = $a.principalId; RoleDefinitionId = $a.roleDefinitionId; AssignmentType = "PIM Eligible (Direct)" })
+        }
+        $eligUri2 = $resp.'@odata.nextLink'
+    } while ($eligUri2)
+
+    # ── Step 4: Deduplicate ───────────────────────────────────────────────────
+    # Steps 2+3 (Permanent/PIM Active) dedup by PrincipalId+RoleId — the same PIM-active
+    # assignment can appear in both /roleAssignments and /roleAssignmentScheduleInstances.
+    # Step 3b (PIM Eligible) uses its own set so an eligible assignment for the same
+    # role/principal still surfaces alongside any active one as a separate finding.
+    $seenActiveKeys   = [System.Collections.Generic.HashSet[string]]::new()
+    $seenEligibleKeys = [System.Collections.Generic.HashSet[string]]::new()
+    $uniqueAssignments = $rawAssignments | Where-Object {
+        if ($_.AssignmentType -eq "PIM Eligible (Direct)") {
+            $seenEligibleKeys.Add("$($_.PrincipalId)_$($_.RoleDefinitionId)")
+        } else {
+            $seenActiveKeys.Add("$($_.PrincipalId)_$($_.RoleDefinitionId)")
+        }
+    }
+
+    # ── Step 5: Resolve principals in batch (users, service principals, groups) ─
+    $principalIds  = @($uniqueAssignments | Select-Object -ExpandProperty PrincipalId -Unique)
+    $principalMap  = @{}
+    $batchSize     = 1000
+    for ($i = 0; $i -lt $principalIds.Count; $i += $batchSize) {
+        $batch = $principalIds[$i..([Math]::Min($i + $batchSize - 1, $principalIds.Count - 1))]
+        $body  = @{ ids = $batch; types = @("user", "servicePrincipal", "group") } | ConvertTo-Json -Compress
+        $resolved = Invoke-MgGraphRequest -Method POST `
+            -Uri "https://graph.microsoft.com/v1.0/directoryObjects/getByIds" `
+            -Body $body -ContentType "application/json" -ErrorAction Stop
+        foreach ($obj in $resolved.value) {
+            $principalMap[$obj.id] = [PSCustomObject]@{
+                DisplayName = $obj.displayName
+                UPN         = if ($obj.userPrincipalName) { $obj.userPrincipalName } else { "N/A" }
+                Type        = switch ($obj.'@odata.type') {
+                    '#microsoft.graph.user'             { "User" }
+                    '#microsoft.graph.servicePrincipal' { "Service Principal" }
+                    '#microsoft.graph.group'            { "Group" }
+                    default                             { "Unknown" }
+                }
+                IsGroup     = ($obj.'@odata.type' -eq '#microsoft.graph.group')
+                Id          = $obj.id
+            }
+        }
+    }
+
+    # ── Step 6: Build audit list — users, SPs, and unmanaged groups ───────────
+    $auditList = $uniqueAssignments | ForEach-Object {
+        $principal = $principalMap[$_.PrincipalId]
+        if (-not $principal) { return }
+        # Suppress groups that are managed by this script — their assignments are expected
+        if ($principal.IsGroup -and $managedGroupIds.Contains($principal.Id)) { return }
+        [PSCustomObject]@{
+            RoleName           = if ($roleDefMap[$_.RoleDefinitionId]) { $roleDefMap[$_.RoleDefinitionId] } else { $_.RoleDefinitionId }
+            PrincipalType      = $principal.Type
+            DisplayName        = $principal.DisplayName
+            UserPrincipalName  = $principal.UPN
+            AssignmentType     = $_.AssignmentType
+            RequiredCorrection = if ($principal.IsGroup) {
+                "Unmanaged group with direct role assignment — add to GroupConfigs or remove"
+            } elseif ($principal.Type -eq "Service Principal") {
+                "Review SP role assignment — service principals cannot join PIM groups; consider a managed identity or scoped app registration instead"
+            } else {
+                "Remove direct assignment — reassign via PIM group"
+            }
+        }
+    } | Where-Object { $_ }
+
+    # ── Step 7: Report ────────────────────────────────────────────────────────
+    if ($auditList.Count -eq 0) {
+        Write-PIMLog -Level OK -Phase "P7" -Message "No direct user/SP/unmanaged-group role assignments found — all roles are properly managed."
+    } else {
+        Write-PIMLog -Level WARN -Phase "P7" -Message "$($auditList.Count) direct assignment(s) found — see CSV for required corrections."
+        Write-Host ""
+
+        foreach ($group in ($auditList | Group-Object RoleName | Sort-Object Name)) {
+            Write-Host "  $($group.Name)" -ForegroundColor Yellow
+            foreach ($row in $group.Group) {
+                Write-Host "    ├ [$($row.PrincipalType)] $($row.DisplayName) ($($row.UserPrincipalName))  [$($row.AssignmentType)]" -ForegroundColor White
+            }
+        }
+        Write-Host ""
+
+        if ($transcriptFolder) {
+            $csvFile = Join-Path $transcriptFolder ("OnboardingPIM_DirectAssignments_{0}.csv" -f $script:RunTimestamp)
+            try {
+                # Write UTF-8 with BOM so Excel opens the file without garbling special characters
+                $csv = $auditList | ConvertTo-Csv -NoTypeInformation
+                [System.IO.File]::WriteAllLines($csvFile, $csv, [System.Text.UTF8Encoding]::new($true))
+                Write-PIMLog -Level OK -Phase "P7" -Message "CSV exported: $csvFile"
+            } catch {
+                Write-PIMLog -Level WARN -Phase "P7" -Message "Could not export CSV: $($_.Exception.Message)"
+            }
+        } else {
+            Write-PIMLog -Level WARN -Phase "P7" -Message "No writable folder available — CSV not exported."
+        }
+    }
+} catch {
+    Write-PIMLog -Level WARN -Phase "P7" -Message "Could not complete direct assignment audit: $($_.Exception.Message)"
+}
+
+# ── Step 8: Discover unmanaged PIM4Groups ────────────────────────────────────
+Write-Host ""
+Write-PIMLog -Level INFO -Phase "P7" -Message "Scanning for PIM4Groups not in the authorization matrix..."
+
+$managedPIM4Ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($config in $GroupConfigs | Where-Object { $_.PIM4Group -eq $true }) {
+    if ($config['_GroupId'] -and $config['_GroupId'] -ne '[DRY-RUN-ID]') {
+        [void] $managedPIM4Ids.Add($config['_GroupId'])
+    }
+}
+
+try {
+    $seenPIM4Ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $pgUri = "https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/eligibilitySchedules?`$select=groupId"
+    do {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $pgUri -ErrorAction Stop
+        foreach ($sched in $resp.value) { [void] $seenPIM4Ids.Add($sched.groupId) }
+        $pgUri = $resp.'@odata.nextLink'
+    } while ($pgUri)
+
+    $unknownPIM4List = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($gid in $seenPIM4Ids) {
+        if ($managedPIM4Ids.Contains($gid)) { continue }
+        $groupName = "(unresolved)"
+        $groupDesc = "N/A"
+        try {
+            $groupResp = Invoke-MgGraphRequest -Method GET `
+                -Uri "https://graph.microsoft.com/v1.0/groups/$gid`?`$select=displayName,description" `
+                -ErrorAction Stop
+            if ($groupResp.displayName) { $groupName = $groupResp.displayName }
+            if ($groupResp.description)  { $groupDesc  = $groupResp.description  }
+        } catch {}
+        $unknownPIM4List.Add([PSCustomObject]@{
+            GroupId     = $gid
+            DisplayName = $groupName
+            Description = $groupDesc
+            Finding     = "PIM4Group not in authorization matrix — review and add to GroupConfigs or remove"
+        })
+    }
+
+    if ($unknownPIM4List.Count -eq 0) {
+        Write-PIMLog -Level OK -Phase "P7" -Message "No unmanaged PIM4Groups found — all PIM for Groups configurations are in the authorization matrix."
+    } else {
+        Write-PIMLog -Level WARN -Phase "P7" -Message "$($unknownPIM4List.Count) unmanaged PIM4Group(s) found — not in authorization matrix:"
+        Write-Host ""
+        foreach ($entry in $unknownPIM4List) {
+            Write-Host "  $($entry.DisplayName)  (Id: $($entry.GroupId))" -ForegroundColor Yellow
+            if ($entry.Description -ne "N/A") {
+                Write-Host "    $($entry.Description)" -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ""
+
+        if ($transcriptFolder) {
+            $pim4CsvFile = Join-Path $transcriptFolder ("OnboardingPIM_UnmanagedPIM4Groups_{0}.csv" -f $script:RunTimestamp)
+            try {
+                $csv = $unknownPIM4List | ConvertTo-Csv -NoTypeInformation
+                [System.IO.File]::WriteAllLines($pim4CsvFile, $csv, [System.Text.UTF8Encoding]::new($true))
+                Write-PIMLog -Level OK -Phase "P7" -Message "Unmanaged PIM4Groups CSV exported: $pim4CsvFile"
+            } catch {
+                Write-PIMLog -Level WARN -Phase "P7" -Message "Could not export PIM4Groups CSV: $($_.Exception.Message)"
+            }
+        }
+    }
+} catch {
+    Write-PIMLog -Level WARN -Phase "P7" -Message "Could not scan for unmanaged PIM4Groups: $($_.Exception.Message)"
 }
 
 # =====================
@@ -1114,7 +1856,7 @@ if ($approverGroup_M365 -and $approverGroup_Security) {
 try { Disconnect-MgGraph -ErrorAction SilentlyContinue } catch {}
 
 # ===========================================================================
-# PHASE 7 — Summary report
+# PHASE 8 — Summary report
 # ===========================================================================
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -1130,14 +1872,19 @@ foreach ($phase in $phases) {
     $err  = ($entries | Where-Object { $_.Level -eq "ERR"  }).Count
 
     $phaseLabel = switch ($phase) {
-        "PRE" { "Pre-flight — User Existence Check     " }
-        "P1"  { "Phase 1 — Group Provisioning          " }
-        "P2"  { "Phase 2 — PIM Group Policies          " }
-        "P3"  { "Phase 3 — Group Membership            " }
-        "P4"  { "Phase 4 — Group Role Assignments      " }
-        "P5"  { "Phase 5 — Standard Role Policies      " }
-        "P6"  { "Phase 6 — Privileged Role Policies    " }
-        default { $phase }
+        "PRE-PERM" { "Pre-flight — Permission Validation    " }
+        "PRE-USR"  { "Pre-flight — User Existence Check     " }
+        "PRE-CA"   { "Pre-flight — Auth Context & CA        " }
+        "PRE-LIC"  { "Pre-flight — License Validation       " }
+        "PRE-DISC" { "Pre-flight — Role Discovery           " }
+        "P1"       { "Phase 1 — Group Provisioning          " }
+        "P2"       { "Phase 2 — PIM Group Policies          " }
+        "P3"       { "Phase 3 — Group Membership            " }
+        "P4"       { "Phase 4 — Group Role Assignments      " }
+        "P5"       { "Phase 5 — Standard Role Policies      " }
+        "P6"       { "Phase 6 — Privileged Role Policies    " }
+        "P7"       { "Phase 7 — Direct Assignment Audit     " }
+        default    { $phase }
     }
 
     $statusColor = if ($err -gt 0) { "Red" } elseif ($warn -gt 0) { "Yellow" } else { "Green" }
@@ -1171,3 +1918,11 @@ if ($totalErrors -gt 0) {
 }
 
 Write-Host ""
+
+} finally {
+    # Always stop the transcript — runs on normal exit, errors, and Ctrl+C
+    if ($transcriptFile) {
+        Write-Host "Transcript saved to: $transcriptFile" -ForegroundColor DarkGray
+        try { Stop-Transcript -ErrorAction SilentlyContinue } catch {}
+    }
+}

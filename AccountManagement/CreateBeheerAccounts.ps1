@@ -14,7 +14,7 @@
     ── ACCOUNT CONVENTIONS ───────────────────────────────────────────────────────
     • UPN format   : b.[firstname].[lastname_last_word]@psbv.org
     • DisplayName  : Beheer [FirstName] [LastName]
-    • EmployeeID   : B000001 … B000062
+    • EmployeeID   : B000001 … B000070
     • JobTitle     : Beheerder
     • EmployeeType : Beheerder
     ──────────────────────────────────────────────────────────────────────────────
@@ -104,6 +104,16 @@ $BeheerAccounts = @(
     @{ FirstName = "Jeroen";  LastName = "Oosterhout";   UPNPrefix = "b.jeroen.oosterhout"; Department = "Dataplatform";        EmployeeID = "B000029" }
     @{ FirstName = "Lisa";    LastName = "van den Heuvel";UPNPrefix = "b.lisa.heuvel";   Department = "Dataplatform";           EmployeeID = "B000030" }
 
+    # ── Azure Infra ───────────────────────────────────────────────────────────
+    @{ FirstName = "Arjan";   LastName = "Visscher";     UPNPrefix = "b.arjan.visscher";    Department = "Infrastructuur"; EmployeeID = "B000063" }
+    @{ FirstName = "Tessa";   LastName = "Blom";         UPNPrefix = "b.tessa.blom";        Department = "Infrastructuur"; EmployeeID = "B000064" }
+    @{ FirstName = "Gijs";    LastName = "Hendrikx";     UPNPrefix = "b.gijs.hendrikx";     Department = "Infrastructuur"; EmployeeID = "B000065" }
+    @{ FirstName = "Sofie";   LastName = "Wolters";      UPNPrefix = "b.sofie.wolters";     Department = "Infrastructuur"; EmployeeID = "B000066" }
+    @{ FirstName = "Martijn"; LastName = "Groen";        UPNPrefix = "b.martijn.groen";     Department = "Infrastructuur"; EmployeeID = "B000067" }
+    @{ FirstName = "Sjoerd";  LastName = "Koolen";       UPNPrefix = "b.sjoerd.koolen";     Department = "Infrastructuur"; EmployeeID = "B000068" }
+    @{ FirstName = "Mandy";   LastName = "Verbruggen";   UPNPrefix = "b.mandy.verbruggen";  Department = "Infrastructuur"; EmployeeID = "B000069" }
+    @{ FirstName = "Hugo";    LastName = "van Zanten";   UPNPrefix = "b.hugo.zanten";       Department = "Infrastructuur"; EmployeeID = "B000070" }
+
     # ── IAM / Saviynt ─────────────────────────────────────────────────────────
     @{ FirstName = "Mark";    LastName = "Timmers";      UPNPrefix = "b.mark.timmers";   Department = "IAM";                    EmployeeID = "B000031" }
 
@@ -148,6 +158,13 @@ $BeheerAccounts = @(
 # ===========================================================================
 # SCRIPT INTERNALS — do not edit below this line
 # ===========================================================================
+
+# ── Transcript — started after Graph connect so tenant name can be resolved ──
+$script:RunTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$transcriptFolder    = $null
+$transcriptFile      = $null
+
+try {
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 $script:Log = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -226,6 +243,38 @@ try {
 } catch {
     Write-Host "FATAL: Could not connect to Microsoft Graph: $_" -ForegroundColor Red
     exit 1
+}
+
+# Resolve tenant display name → Desktop/<TenantName>/CreateBeheerAccounts/
+$orgDisplayName = "Unknown"
+try {
+    $orgResp = Invoke-MgGraphRequest -Method GET `
+        -Uri "https://graph.microsoft.com/v1.0/organization?`$select=displayName" `
+        -ErrorAction Stop
+    if ($orgResp.value -and $orgResp.value[0].displayName) {
+        $orgDisplayName = $orgResp.value[0].displayName -replace '[<>:"/\\|?*]', '_'
+    }
+} catch {}
+
+$transcriptFolder = Join-Path ([Environment]::GetFolderPath('Desktop')) (Join-Path $orgDisplayName "CreateBeheerAccounts")
+try {
+    New-Item -ItemType Directory -Force -Path $transcriptFolder -ErrorAction Stop | Out-Null
+} catch {
+    $transcriptFolder = [Environment]::GetFolderPath('Desktop')
+}
+
+$transcriptFile = Join-Path $transcriptFolder ("CreateBeheerAccounts_{0}.txt" -f $script:RunTimestamp)
+try {
+    Start-Transcript -Path $transcriptFile -NoClobber -ErrorAction Stop
+    Write-Host "Transcript : $transcriptFile" -ForegroundColor DarkGray
+    Write-Host "Author     : Melih Sivrikaya" -ForegroundColor DarkGray
+    Write-Host "Script     : CreateBeheerAccounts.ps1" -ForegroundColor DarkGray
+    Write-Host "Run date   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+    Write-Host "Tenant     : $TenantId ($orgDisplayName)" -ForegroundColor DarkGray
+    Write-Host ""
+} catch {
+    Write-Host "Could not start transcript: $_" -ForegroundColor Yellow
+    $transcriptFile = $null
 }
 
 # ── Create accounts ───────────────────────────────────────────────────────────
@@ -370,3 +419,10 @@ if ($failed.Count -gt 0) {
 
 Write-Host "Done!" -ForegroundColor Green
 Write-Host ""
+
+} finally {
+    if ($transcriptFile) {
+        Write-Host "Transcript saved to: $transcriptFile" -ForegroundColor DarkGray
+        try { Stop-Transcript -ErrorAction SilentlyContinue } catch {}
+    }
+}
