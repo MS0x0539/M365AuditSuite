@@ -24,7 +24,7 @@
     presence, and UserType:
 
         User              — Member, enabled, has at least one license
-        Service Account   — Member, enabled, no licenses
+        Unlicensed User   — Member, enabled, no licenses
         Disabled User     — Member, disabled, has at least one license
         Shared/Resource   — Member, disabled, no licenses, has mail address
                             (covers shared mailboxes, room and equipment mailboxes)
@@ -113,7 +113,7 @@ function Get-AccountType {
     )
     if ($UserType -eq "Guest")                          { return "Guest"            }
     if ($Enabled  -and $LicenseCount -gt 0)             { return "User"             }
-    if ($Enabled  -and $LicenseCount -eq 0)             { return "Service Account"  }
+    if ($Enabled  -and $LicenseCount -eq 0)             { return "Unlicensed User"  }
     if (-not $Enabled -and $LicenseCount -gt 0)         { return "Disabled User"    }
     if (-not $Enabled -and $LicenseCount -eq 0 -and $HasMail) { return "Shared/Resource" }
     return "System/Orphaned"
