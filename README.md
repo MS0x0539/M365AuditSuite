@@ -39,6 +39,8 @@ M365AuditSuite/
     │   └── ResetUser.ps1
     ├── CertificateCreator/
     │   └── CertificateCreator.ps1
+    ├── AppManagement/
+    │   └── BrowseApps.ps1
     └── GroupManagement/
         ├── ManageProtectedGroup.ps1
         ├── ReadProtectedGroup.ps1
@@ -195,6 +197,66 @@ Includes drift detection on the P2 policy — validates auth context reference, 
 ---
 
 ## Tools
+
+### AppManagement
+
+Scripts in this folder use the **ExportReadAudit** app registration with certificate-based authentication.
+
+#### BrowseApps.ps1
+
+Interactive read-only browser for App Registrations and Enterprise Applications. Connects once, loads all data into memory, and presents a menu-driven interface — no changes are made to the tenant at any point.
+
+**App Registrations — filter views:**
+
+| Filter | Description |
+|--------|-------------|
+| All | Full list, sorted by name |
+| Privileged | Apps holding one or more privileged permissions (e.g. `Directory.ReadWrite.All`, `User.ReadWrite.All`) |
+| No owner | Apps with no assigned owner — no accountability for lifecycle or permissions |
+| Expiring / expired credentials | Apps with certificates or client secrets at EXPIRED / CRITICAL / WARNING / NOTICE status |
+| Multi-tenant | Apps registered for audiences beyond the home tenant |
+| No recent activity / stale | Apps with no sign-in recorded within `$StaleActivityDays` (default 90) or no activity in the retention window (requires `AuditLog.Read.All`) |
+| Search by name | Wildcard name search across all app registrations |
+
+**Enterprise Applications — filter views:**
+
+| Filter | Description |
+|--------|-------------|
+| All | Full list, sorted by owner type then name |
+| Tenant-owned | Service principals created by the tenant (your own apps) |
+| Third-party | Service principals owned by external organisations |
+| Disabled | SPs with `AccountEnabled = false` |
+| Apps with delegated grants | SPs that have active OAuth2 delegated permission grants (requires `Directory.Read.All`) |
+| Search by name | Wildcard name search across all service principals |
+
+**List view** shows credential expiry status with days remaining (e.g. `CRITICAL (3d)`, `EXPIRED (12d ago)`) matching the AuditSuite expiry report format. Flags such as `[PRIVILEGED]`, `[NO OWNER]`, `[STALE]`, and `[NO ACTIVITY]` appear inline.
+
+**Detail view** (enter a number from any list) shows:
+- App Registration: owners, all permissions with privileged ones flagged in red, sign-in activity breakdown (app credential / delegated / non-interactive, with days since last use), certificates and secrets with individual expiry status and days remaining, federated identity credentials (issuer, subject, audiences)
+- Enterprise Application: SP type, owner classification, granted application permissions with privileged flag, delegated permission grants per user or admin consent
+
+**CSV export** — press **[X]** in any list. App Registration exports include: `UsageStatus`, `LastUsed`, `DaysSinceLastUse`, `LastAppCredSignIn`, `LastDelegatedSignIn`, `LastNonInteractiveSignIn`, `HasCertificate`, `WorstCertExpiry`, `Certificates` (name / expiry date / status per cert), `HasSecret`, `WorstSecretExpiry`, `Secrets`, `HasFederation`, `FederationCredentials`, plus all permissions columns.
+
+Use **[R]** from the main menu to reload all data without reconnecting.
+
+**Configurable thresholds** (top of script):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `$CriticalDays` | 14 | Credential expiry critical threshold |
+| `$WarningDays` | 30 | Credential expiry warning threshold |
+| `$NoticeDays` | 60 | Credential expiry notice threshold |
+| `$StaleActivityDays` | 90 | Days without sign-in before an app is flagged stale |
+
+**Permissions:** `Application.Read.All`, `User.Read.All`
+
+**Optional:**
+- `Directory.Read.All` — delegated permission grants view (skipped gracefully if absent)
+- `AuditLog.Read.All` — SP sign-in activity report for last-used dates (skipped gracefully if absent)
+
+> **Note:** Sign-in activity retention is 30 days (Entra ID P1) or 90 days (P2). "No activity" means no sign-in recorded within the retention window — it does not prove the app is unused.
+
+---
 
 ### AccountManagement
 
