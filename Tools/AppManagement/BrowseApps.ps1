@@ -74,6 +74,7 @@ $script:HasOAuthAccess     = $false  # true when Directory.Read.All is available
 $script:ActivityByAppId    = @{}     # Hashtable: appId → SP sign-in activity record
 $script:HasActivityAccess  = $false  # true when AuditLog.Read.All is available
 $script:TenantDisplay      = ""      # friendly name for header
+$script:ExportFolder       = $null   # resolved once after connect
 
 # ── Privileged permission names ───────────────────────────────────────────────
 $PrivilegedPermissions = [System.Collections.Generic.HashSet[string]]@(
@@ -163,6 +164,7 @@ function Get-UsageColor {
 
 # ── CSV export ────────────────────────────────────────────────────────────────
 function Resolve-ExportFolder {
+    param([string]$TenantTag)
     $candidates = @(
         [Environment]::GetFolderPath('Desktop')
         "$env:USERPROFILE\Desktop"
@@ -170,7 +172,7 @@ function Resolve-ExportFolder {
     )
     foreach ($base in $candidates) {
         if (-not $base) { continue }
-        $target = Join-Path $base "AppManagement"
+        $target = Join-Path $base (Join-Path $TenantTag "AppManagement")
         try {
             New-Item -ItemType Directory -Force -Path $target -ErrorAction Stop | Out-Null
             return $target
@@ -185,11 +187,11 @@ function Export-ListToCsv {
         Write-Host "  Nothing to export." -ForegroundColor Yellow
         return
     }
-    $folder = Resolve-ExportFolder
-    if (-not $folder) {
-        Write-Host "  Could not resolve export folder." -ForegroundColor Red
+    if (-not $script:ExportFolder) {
+        Write-Host "  Export folder not resolved." -ForegroundColor Red
         return
     }
+    $folder = $script:ExportFolder
     $ts   = Get-Date -Format "yyyyMMdd_HHmmss"
     $dest = Join-Path $folder "${Prefix}_${ts}.csv"
     try {
@@ -1057,6 +1059,13 @@ try {
         $script:TenantDisplay = if ($org -and $org.DisplayName) { $org.DisplayName } else { $TenantId }
     } catch {
         $script:TenantDisplay = $TenantId
+    }
+
+    # Resolve export folder once — Desktop (OneDrive) → Desktop → C:\Audit\
+    $tenantTag            = $script:TenantDisplay -replace '[^A-Za-z0-9_-]', ''
+    $script:ExportFolder  = Resolve-ExportFolder -TenantTag $tenantTag
+    if (-not $script:ExportFolder) {
+        Write-Host "  WARN: Could not create export folder under any Desktop location — CSV exports will fail." -ForegroundColor Yellow
     }
 
     Write-Host ("  Connected: {0}" -f $script:TenantDisplay) -ForegroundColor Green

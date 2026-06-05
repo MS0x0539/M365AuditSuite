@@ -235,7 +235,7 @@ Interactive read-only browser for App Registrations and Enterprise Applications.
 - App Registration: owners, all permissions with privileged ones flagged in red, sign-in activity breakdown (app credential / delegated / non-interactive, with days since last use), certificates and secrets with individual expiry status and days remaining, federated identity credentials (issuer, subject, audiences)
 - Enterprise Application: SP type, owner classification, granted application permissions with privileged flag, delegated permission grants per user or admin consent
 
-**CSV export** — press **[X]** in any list. App Registration exports include: `UsageStatus`, `LastUsed`, `DaysSinceLastUse`, `LastAppCredSignIn`, `LastDelegatedSignIn`, `LastNonInteractiveSignIn`, `HasCertificate`, `WorstCertExpiry`, `Certificates` (name / expiry date / status per cert), `HasSecret`, `WorstSecretExpiry`, `Secrets`, `HasFederation`, `FederationCredentials`, plus all permissions columns.
+**CSV export** — press **[X]** in any list. App Registration exports include: `UsageStatus`, `LastUsed`, `DaysSinceLastUse`, `LastAppCredSignIn`, `LastDelegatedSignIn`, `LastNonInteractiveSignIn`, `HasCertificate`, `WorstCertExpiry`, `Certificates` (name / expiry date / status per cert), `HasSecret`, `WorstSecretExpiry`, `Secrets`, `HasFederation`, `FederationCredentials`, plus all permissions columns. Exports land in `Desktop\<TenantName>\AppManagement\` — resolved with the same 3-way logic as all other scripts: Desktop (OneDrive) → Desktop (default) → `C:\Audit\<TenantName>\AppManagement\`.
 
 Use **[R]** from the main menu to reload all data without reconnecting.
 
