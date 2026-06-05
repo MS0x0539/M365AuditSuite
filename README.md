@@ -266,7 +266,7 @@ All scripts in this folder use the **AccountManagement** app registration with c
 
 #### CheckAllUsersActivity.ps1
 
-Tenant-wide bulk inactivity check. Checks every user against all three `SignInActivity` fields on the user record, classifies each as ACTIVE / INACTIVE / NEVER, prints a console table of flagged users, and exports a full CSV for all users. One prompt: inactivity threshold in days.
+Tenant-wide bulk inactivity check. Checks every user against all three `SignInActivity` fields on the user record and classifies each user by both activity status (ACTIVE / INACTIVE / NEVER) and account type (User / Service Account / Disabled User / Shared/Resource / System/Orphaned / Guest). After loading, shows account type counts and prompts for a filter scope (All / Users only / Licensed only / Members only) so shared mailboxes, service accounts, and guests can be excluded. Console shows flagged accounts; CSV includes `AccountType` and `LicenseCount` for further filtering in Excel.
 
 **Permissions:** `User.Read.All`, `AuditLog.Read.All`
 
