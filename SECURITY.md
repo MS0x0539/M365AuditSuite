@@ -13,18 +13,12 @@ This project is a PowerShell script collection, not versioned software. Only the
 
 If you discover a security vulnerability in this project — for example a script that could be abused, an insecure coding pattern, or exposed sensitive data — please report it **privately** rather than opening a public issue.
 
-**Contact:** ms@psbv.org
+**Contact:** security@psbv.org
 
 Please include:
 - A clear description of the vulnerability
 - The affected script(s) and line numbers if applicable
 - Steps to reproduce or a proof of concept
 - The potential impact
-
-**What to expect:**
-- Acknowledgement within **3 business days**
-- A status update within **7 business days**
-- If accepted: the issue will be patched and a note added to the commit message
-- If declined: you will receive a clear explanation of why it was not considered a vulnerability
 
 Please do not publicly disclose the vulnerability until it has been reviewed and, if applicable, patched.
