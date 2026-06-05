@@ -31,6 +31,7 @@ M365AuditSuite/
 │   └── OnboardingConditionalAccess.ps1
 └── Tools/
     ├── AccountManagement/
+    │   ├── CheckUserActivity.ps1
     │   ├── CreateNewAccount.ps1
     │   ├── CreateBeheerAccounts.ps1
     │   ├── DeleteAccount.ps1
@@ -260,7 +261,22 @@ Use **[R]** from the main menu to reload all data without reconnecting.
 
 ### AccountManagement
 
-All scripts in this folder use the **AccountManagement** app registration with certificate-based authentication.
+All scripts in this folder use the **AccountManagement** app registration with certificate-based authentication, except `CheckUserActivity.ps1` which uses **ExportReadAudit** (requires `AuditLog.Read.All`).
+
+#### CheckUserActivity.ps1
+
+Comprehensive read-only inactivity check for a single user. Prompts for a UPN or display name and an inactivity threshold in days. Checks every available sign-in source and prints a clear **ACTIVE / INACTIVE** verdict with full detail.
+
+**Two sources checked:**
+
+| Source | What it covers |
+|---|---|
+| `SignInActivity` on the user object | `lastSuccessfulSignInDateTime` (any type), `lastSignInDateTime` (interactive), `lastNonInteractiveSignInDateTime` — authoritative, not limited by log retention |
+| Sign-in log events (audit log) | Per-event detail: date/time, type, application, IP address, result, risk level — limited to 30d (P1) or 90d (P2) retention |
+
+The verdict uses the most recent timestamp across all sources. If the user record shows no activity and the logs show no events, the user is reported **INACTIVE** regardless of retention window.
+
+**Permissions:** `User.Read.All`, `AuditLog.Read.All`
 
 #### CreateNewAccount.ps1
 Creates a new regular user account in Entra ID. Fills all standard user properties (name, department, job title, address, phone, usage location, etc.). Generates a random 16-character temporary password (upper + lower + digits) and prints it to the console. The user must change it on first sign-in.
