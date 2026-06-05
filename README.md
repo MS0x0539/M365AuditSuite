@@ -31,6 +31,7 @@ M365AuditSuite/
 │   └── OnboardingConditionalAccess.ps1
 └── Tools/
     ├── AccountManagement/
+    │   ├── CheckAllUsersActivity.ps1
     │   ├── CheckUserActivity.ps1
     │   ├── CreateNewAccount.ps1
     │   ├── CreateBeheerAccounts.ps1
@@ -262,6 +263,12 @@ Use **[R]** from the main menu to reload all data without reconnecting.
 ### AccountManagement
 
 All scripts in this folder use the **AccountManagement** app registration with certificate-based authentication, except `CheckUserActivity.ps1` which uses **ExportReadAudit** (requires `AuditLog.Read.All`).
+
+#### CheckAllUsersActivity.ps1
+
+Tenant-wide bulk inactivity check. Checks every user against all three `SignInActivity` fields on the user record, classifies each as ACTIVE / INACTIVE / NEVER, prints a console table of flagged users, and exports a full CSV for all users. One prompt: inactivity threshold in days.
+
+**Permissions:** `User.Read.All`, `AuditLog.Read.All`
 
 #### CheckUserActivity.ps1
 
